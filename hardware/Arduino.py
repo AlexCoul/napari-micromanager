@@ -5,6 +5,7 @@ Sketch to control Ardunio for transmission LED ring and fluorescence LED trigger
 '''
 
 import time
+import serial
 
 # serial_port_var is the handle of the arduino serial port, e.g.   serial_port_var = serial.Serial(port='COM3', baudrate=115200, timeout=.1)= serial.Serial(port='COM3', baudrate=115200, timeout=2)
 # arduino = Serial(port=arduinoCom, baudrate=115200, timeout=.1)
@@ -16,10 +17,16 @@ import time
 # x= 'f' blocks camera TTL to triggerscope. Function returns 'f' to confirm that it has been turned off
 
 
-def cam_trigger_2_tgs(serial_port_var, x):
-    serial_port_var.flushInput
-    serial_port_var.flushOutput
-    serial_port_var.write(bytes(x, 'utf-8'))
+def init_arduino(port,baudrate,timeout):
+
+    arduino_port = serial.Serial(port=port, baudrate=baudrate, timeout=timeout)
+
+    return arduino_port
+
+def cam_trigger_2_tgs(arduino_port, x):
+    arduino_port.flushInput
+    arduino_port.flushOutput
+    arduino_port.write(bytes(x, 'utf-8'))
     time.sleep(0.01)
-    data = serial_port_var.readline().decode('ascii').strip('\r\n')
+    data = arduino_port.readline().decode('ascii').strip('\r\n')
     return data
