@@ -14,6 +14,7 @@ from ._shutters_widget import MMShuttersWidget
 from ._slider_dialog import SliderDialog
 from ._tab_widget import MMTabWidget
 from ._xyz_stages import MMStagesWidget
+from ._fish_widget._fish_widget import FishWidget
 
 
 class MicroManagerWidget(QtW.QWidget):
@@ -32,6 +33,7 @@ class MicroManagerWidget(QtW.QWidget):
         self.shutter_wdg = MMShuttersWidget()
         self.mda = MMMultiDWidget()
         self.explorer = MMExploreSample()
+        self.fish = FishWidget()
         self.create_gui()
 
     def create_gui(self):
@@ -94,6 +96,29 @@ class MicroManagerWidget(QtW.QWidget):
 
         # set main_layout layout
         self.setLayout(self.main_layout)
+        
+        # add fish collapsible
+        self.fish_group = QtW.QGroupBox()
+        self.fish_group_layout = QtW.QVBoxLayout()
+        self.fish_group_layout.setSpacing(0)
+        self.fish_group_layout.setContentsMargins(1, 0, 1, 1)
+        coll_sizepolicy = QtW.QSizePolicy(
+            QtW.QSizePolicy.Minimum, QtW.QSizePolicy.Fixed
+        )
+        self.fish_coll = QCollapsible(title="FISH")
+        self.fish_coll.layout().setSpacing(0)
+        self.fish_coll.layout().setContentsMargins(0, 0, 0, 0)
+        self.fish_coll.setSizePolicy(coll_sizepolicy)
+        # add fish widgets
+        # obj_prop = self.add_mm_objectives_widget()
+        # ill_shutter = self.add_shutter_widgets()
+        # cam = self.add_camera_widget()
+        self.fish_coll.addWidget(self.fish)
+        self.fish_coll.expand(animate=False)
+        self.fish_group_layout.addWidget(self.fish_coll)
+        self.fish_group.setLayout(self.fish_group_layout)
+        self.main_layout.addWidget(self.fish_group)
+
 
     def add_camera_widget(self):
         self.cam_group = QtW.QWidget()
