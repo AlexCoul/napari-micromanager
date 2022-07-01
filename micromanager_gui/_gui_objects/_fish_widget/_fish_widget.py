@@ -21,7 +21,9 @@ from distutils.util import strtobool
 import pandas as pd
 from hardware.HamiltonMVP import HamiltonMVP
 from hardware.APump import APump
+from hardware.Arduino import init_arduino, set_state
 from utils.fluidics_control import run_fluidic_program
+
 
 if TYPE_CHECKING:
     from pymmcore_plus.mda import PMDAEngine
@@ -85,7 +87,6 @@ class FishWidget(FishWidgetGui):
         self._mmc.mda.events.sequencePauseToggled.connect(self._on_mda_paused)
         self._mmc.events.mdaEngineRegistered.connect(self._update_mda_engine)
 
-
         # fluidics parameters
         self.fluidics_file_path = None
         self.fluidics_program = None
@@ -101,10 +102,12 @@ class FishWidget(FishWidgetGui):
                                 'serial_verbose': False,
                                 'flip_flow_direction': False}
 
+        # arduino controller parameters
+        self.arduino_port = 'COM17'
 
         # tiling parameters
-
         self.stage_volume_set = False
+        self.overlap = .2
 
     def _update_mda_engine(self, newEngine: PMDAEngine, oldEngine: PMDAEngine):
         oldEngine.events.sequenceStarted.disconnect(self._on_mda_started)
@@ -281,6 +284,14 @@ class FishWidget(FishWidgetGui):
         self.fish_dir_lineEdit.setText(self.save_dir)
         self.parent_path = Path(self.save_dir)
 
+    def _connect_arduino(self):
+
+        self.arduino_port = init_arduino(self.arduino_com_port,baudrate=115200,timeout=0.1)
+    
+    def _disconnect_arduino(self):
+
+        self.arduino_port.close()
+
     def _calculate_scan_volume(self):
 
         # set experiment exposure
@@ -297,24 +308,32 @@ class FishWidget(FishWidgetGui):
         self.x_pixels = current_ROI[2]
         self.y_pixels = current_ROI[3]
 
-        # need to get stage positions from widget -> how?
-
+        # grab stage positions from widget
         n_total_positions = self.stage_tableWidget.rowCount()
+        x_grid = np.zeros([n_total_positions],dtype=np.float32)
+        y_grid = np.zeros([n_total_positions],dtype=np.float32)
+        z_grid = np.zeros([n_total_positions],dtype=np.float32)
+        
         for pos_idx in range(n_total_positions):
             x_grid[pos_idx]= self.stage_tableWidget.item(pos_idx,0)
             y_grid[pos_idx]= self.stage_tableWidget.item(pos_idx,1)
             z_grid[pos_idx]= self.stage_tableWidget.item(pos_idx,2)
 
+        x_min = np.min(x_grid)
+        x_max = np.max(x_grid)
+        y_min = np.min(y_grid)
+        y_max = np.min(y_grid)
 
         # calculate number of X,Y positions assuming 20% overlap
         self.overlap = 0.2
-        y_extent = np.abs(y_max_coord - y_min_coord)
-        n_y_positions = int(np.ceil(y_extent / (self.y_pixels/self.overlap)))
-
-        x_extent = np.abs(x_max_coord - x_min_coord)
-        n_x_positions = int(np.ceil(x_extent / (self.x_pixels/self.overlap)))
+        x_positions = np.linspace(x_min,x_max,self.pixel_size*self.x_pixels*self.overlap)
+        y_positions = np.linspace(y_min,y_max,self.pixel_size*self.y_pixels*self.overlap)
+        z_positions = np.mean(z_grid) * np.ones(x_positions.shape[0])
 
         # calculate actual XY tile positions
+        x_grid, y_grid, z_grid = np.meshgrid(x_positions,y_positions,z_positions,indexing='xy')
+
+        xyz_positions = np.vstack([x_grid.ravel(), y_grid.ravel(), z_grid.ravel()])
 
         # calculate Z positions
         n_z_positions = np.abs(self.z_top_doubleSpinBox-self.z_bottom_doubleSpinBox)/self.step_size_doubleSpinBox
@@ -410,7 +429,7 @@ class FishWidget(FishWidgetGui):
                             'Cy5_active': bool(self.channel_states[1])
                             }]
         
-        write_metadata(scan_param_data[0], self.metadata_dir_path / Path('scan_'+str(r_idx).zfill(3)+'_metadata.csv'))
+        self._write_metadata(scan_param_data[0], self.metadata_dir_path / Path('scan_'+str(r_idx).zfill(3)+'_metadata.csv'))
 
     def _save_stage_positions(self,r_idx,tile_xy_idz,tile_z_idx,current_stage_data):
         """
@@ -426,7 +445,7 @@ class FishWidget(FishWidgetGui):
         :return None:
         """
 
-        write_metadata(current_stage_data[0], self.metadata_dir_path / Path('stage_r'+str(r_idx).zfill(3)+'_xy'+str(tile_xy_idz).zfill(3)+'_z'+str(tile_z_idx).zfill(3)+'_metadata.csv'))
+        self._write_metadata(current_stage_data[0], self.metadata_dir_path / Path('stage_r'+str(r_idx).zfill(3)+'_xy'+str(tile_xy_idz).zfill(3)+'_z'+str(tile_z_idx).zfill(3)+'_metadata.csv'))
         
     def _read_fluidics_program(program_path):
         """
@@ -440,7 +459,7 @@ class FishWidget(FishWidgetGui):
         df_program = pd.read_csv(program_path)
         return df_program
     
-    def write_metadata(data_dict, save_path):
+    def _write_metadata(data_dict, save_path):
         """
         Write metadata file as csv
         :param data_dict: dict
@@ -550,9 +569,15 @@ class FishWidget(FishWidgetGui):
 
                             # set Arduino command
                             command = self.DPC_illumination_commands[dpc_idx]
+                            set_state(self.arduino_port,command)
 
                             # snap image
                             raw_dpc_images[ch_idx,:] = self._mmc.snapImage()
+
+                            # turn off illumination
+                            command = "OFF\n"
+                            set_state(self.arduino_port,command)
+                            
 
                         dpc_images[0,:] = (raw_dpc_images[1]-raw_dpc_images[0])/(raw_dpc_images[1]+raw_dpc_images[0])
                         dpc_images[1,:] = (raw_dpc_images[3]-raw_dpc_images[2])/(raw_dpc_images[3]+raw_dpc_images[2])
@@ -596,9 +621,14 @@ class FishWidget(FishWidgetGui):
 
                     # set Arduino command
                     command = self.DPC_illumination_commands[dpc_idx]
+                    set_state(self.arduino_port,command)
 
                     # snap image
                     raw_dpc_images[ch_idx,:] = self._mmc.snapImage()
+
+                    # turn off illumination
+                    command = "OFF\n"
+                    set_state(self.arduino_port,command)
 
                 dpc_images[0,:] = (raw_dpc_images[1]-raw_dpc_images[0])/(raw_dpc_images[1]+raw_dpc_images[0])
                 dpc_images[1,:] = (raw_dpc_images[3]-raw_dpc_images[2])/(raw_dpc_images[3]+raw_dpc_images[2])
@@ -643,9 +673,14 @@ class FishWidget(FishWidgetGui):
 
                         # set Arduino command
                         command = self.DPC_illumination_commands[dpc_idx]
+                        set_state(self.arduino_port,command)
 
                         # snap image
                         raw_dpc_images[ch_idx,:] = self._mmc.snapImage()
+
+                        # turn off illumination
+                        command = "OFF\n"
+                        set_state(self.arduino_port,command)
 
                     dpc_images[0,:] = (raw_dpc_images[1]-raw_dpc_images[0])/(raw_dpc_images[1]+raw_dpc_images[0])
                     dpc_images[1,:] = (raw_dpc_images[3]-raw_dpc_images[2])/(raw_dpc_images[3]+raw_dpc_images[2])
@@ -657,10 +692,15 @@ class FishWidget(FishWidgetGui):
 
                     # set Arduino command
                     command = self.LED_illumination_command
+                    set_state(self.arduino_port,command)
 
                     # snap image
                     flr_round_data[xy_idx, z_idx, :, :] = self._mmc.snapImage()
                     time.sleep(.05)
+
+                    # turn off illumination
+                    command = "OFF\n"
+                    set_state(self.arduino_port,command)
 
             self._save_stage_positions(r_idx,xy_idx,z_idx,round_stage_data,z_offsets[r_idx,:])
             dpc_round_data = None

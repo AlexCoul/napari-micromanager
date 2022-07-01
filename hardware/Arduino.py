@@ -23,7 +23,7 @@ def init_arduino(port,baudrate,timeout):
 
     return arduino_port
 
-def cam_trigger_2_tgs(arduino_port, x):
+def set_state(arduino_port, x):
     arduino_port.flushInput
     arduino_port.flushOutput
     arduino_port.write(bytes(x, 'utf-8'))

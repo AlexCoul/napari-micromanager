@@ -51,6 +51,17 @@ void setup() {
 void loop() {
   // wait for serial command starting sequence
   if(stringComplete) {
+
+    off = true;
+    if(off) {
+      for (int n=0;n<LED_COUNT;n++) {
+        strip.setPixelColor(n, 0, 0, 0);
+      }
+      strip.show();
+      digitalWrite(2,LOW);
+      off = false;
+    }
+
     if (inputString == "ALIGN\n"){
       off = false;
       start_align = true;
