@@ -1,5 +1,3 @@
-from typing import Optional
-
 from fonticon_mdi6 import MDI6
 from typing import Optional
 from qtpy import QtWidgets as QtW
@@ -38,33 +36,34 @@ class FluidicsConfigurationWidget(QtW.QGroupBox):
 
         self.setTitle("Fluidics experiment")
 
-        self.cfg_LineEdit = QLineEdit()
-        self.cfg_LineEdit.setPlaceholderText("IterativeFish.csv")
+        self.fluidics_cfg = QLineEdit()
+        self.fluidics_cfg.setPlaceholderText("IterativeFish.csv")
 
         self.browse_cfg_Button = QPushButton("...")
         self.browse_cfg_Button.clicked.connect(self._browse_cfg)
 
-        self.load_cfg_Button = QPushButton("Load")
-        self.load_cfg_Button.clicked.connect(self.load_cfg)
+        # self.load_cfg_Button = QPushButton("Load")
+        # self.load_cfg_Button.clicked.connect(self.load_cfg)
 
         self.setLayout(QHBoxLayout())
-        self.layout().addWidget(self.cfg_LineEdit)
+        self.layout().addWidget(self.fluidics_cfg)
         self.layout().addWidget(self.browse_cfg_Button)
-        self.layout().addWidget(self.load_cfg_Button)
+        # self.layout().addWidget(self.load_cfg_Button)
 
     def _browse_cfg(self) -> None:
         """Open file dialog to select a config file."""
         (filename, _) = QFileDialog.getOpenFileName(
-            self, "Select a fluidics experiment configuration file", "", "cfg(*.cfg)"
+            self, "Select a fluidics experiment configuration file", "", "(*.csv)"
         )
         if filename:
-            self.cfg_LineEdit.setText(filename)
+            self.fluidics_cfg.setText(filename)
+            print(" self.fluidics_cfg text is",  self.fluidics_cfg.text())
 
-    def load_cfg(self) -> None:
-        """Load the config path currently in the line_edit."""
-        from .. import _core
-
-        _core.load_system_config(self.cfg_LineEdit.text())
+    # def load_cfg(self) -> None:
+    #     """Load the config path currently in the line_edit."""
+    #     # from .. import _core
+    #     # _core.load_system_config(self.fluidics_cfg.text())
+    #     pass
 
 
 
@@ -219,6 +218,53 @@ class FishWidgetGui(QWidget):
 
     # skip creation of a time_group
 
+    def _create_stage_pos_groupBox(self):
+        group = QGroupBox(title="Stage Positions (double-click to move to position)")
+        group.setCheckable(True)
+        group.setChecked(False)
+        group.setMinimumHeight(230)
+        group_layout = QGridLayout()
+        group_layout.setHorizontalSpacing(15)
+        group_layout.setVerticalSpacing(0)
+        group_layout.setContentsMargins(10, 0, 10, 0)
+        group.setLayout(group_layout)
+
+        # table
+        self.stage_tableWidget = QTableWidget()
+        self.stage_tableWidget.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.stage_tableWidget.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.stage_tableWidget.setMinimumHeight(90)
+        hdr = self.stage_tableWidget.horizontalHeader()
+        hdr.setSectionResizeMode(hdr.Stretch)
+        self.stage_tableWidget.verticalHeader().setVisible(False)
+        self.stage_tableWidget.setTabKeyNavigation(True)
+        self.stage_tableWidget.setColumnCount(3)
+        self.stage_tableWidget.setRowCount(0)
+        self.stage_tableWidget.setHorizontalHeaderLabels(["X", "Y", "Z"])
+        group_layout.addWidget(self.stage_tableWidget, 0, 0, 3, 1)
+
+        # buttons
+        btn_sizepolicy = QSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        min_size = 100
+        self.add_pos_Button = QPushButton(text="Add")
+        self.add_pos_Button.setMinimumWidth(min_size)
+        self.add_pos_Button.setSizePolicy(btn_sizepolicy)
+        self.remove_pos_Button = QPushButton(text="Remove")
+        self.remove_pos_Button.setMinimumWidth(min_size)
+        self.remove_pos_Button.setSizePolicy(btn_sizepolicy)
+        self.clear_pos_Button = QPushButton(text="Clear")
+        self.clear_pos_Button.setMinimumWidth(min_size)
+        self.clear_pos_Button.setSizePolicy(btn_sizepolicy)
+
+        self.rect_roi_checkBox = QCheckBox(text="Make rectangle ROI")
+
+        group_layout.addWidget(self.add_pos_Button, 0, 1, 1, 1)
+        group_layout.addWidget(self.remove_pos_Button, 1, 1, 1, 2)
+        group_layout.addWidget(self.clear_pos_Button, 2, 1, 1, 2)
+        group_layout.addWidget(self.rect_roi_checkBox, 3, 1, 1, 2)
+
+        return group
+    
     def _create_stack_groupBox(self):
         group = QGroupBox(title="Z Stacks")
         group.setCheckable(True)
@@ -375,50 +421,6 @@ class FishWidgetGui(QWidget):
         step_wdg_layout.addWidget(s)
         step_wdg_layout.addWidget(self.n_images_label)
         group_layout.addWidget(step_wdg)
-
-        return group
-
-    def _create_stage_pos_groupBox(self):
-        group = QGroupBox(title="Stage Positions (double-click to move to position)")
-        group.setCheckable(True)
-        group.setChecked(False)
-        group.setMinimumHeight(230)
-        group_layout = QGridLayout()
-        group_layout.setHorizontalSpacing(15)
-        group_layout.setVerticalSpacing(0)
-        group_layout.setContentsMargins(10, 0, 10, 0)
-        group.setLayout(group_layout)
-
-        # table
-        self.stage_tableWidget = QTableWidget()
-        self.stage_tableWidget.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.stage_tableWidget.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.stage_tableWidget.setMinimumHeight(90)
-        hdr = self.stage_tableWidget.horizontalHeader()
-        hdr.setSectionResizeMode(hdr.Stretch)
-        self.stage_tableWidget.verticalHeader().setVisible(False)
-        self.stage_tableWidget.setTabKeyNavigation(True)
-        self.stage_tableWidget.setColumnCount(3)
-        self.stage_tableWidget.setRowCount(0)
-        self.stage_tableWidget.setHorizontalHeaderLabels(["X", "Y", "Z"])
-        group_layout.addWidget(self.stage_tableWidget, 0, 0, 3, 1)
-
-        # buttons
-        btn_sizepolicy = QSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        min_size = 100
-        self.add_pos_Button = QPushButton(text="Add")
-        self.add_pos_Button.setMinimumWidth(min_size)
-        self.add_pos_Button.setSizePolicy(btn_sizepolicy)
-        self.remove_pos_Button = QPushButton(text="Remove")
-        self.remove_pos_Button.setMinimumWidth(min_size)
-        self.remove_pos_Button.setSizePolicy(btn_sizepolicy)
-        self.clear_pos_Button = QPushButton(text="Clear")
-        self.clear_pos_Button.setMinimumWidth(min_size)
-        self.clear_pos_Button.setSizePolicy(btn_sizepolicy)
-
-        group_layout.addWidget(self.add_pos_Button, 0, 1, 1, 1)
-        group_layout.addWidget(self.remove_pos_Button, 1, 1, 1, 2)
-        group_layout.addWidget(self.clear_pos_Button, 2, 1, 1, 2)
 
         return group
 

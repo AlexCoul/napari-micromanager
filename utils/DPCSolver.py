@@ -14,7 +14,7 @@ Z. F. Phillips, M. Chen, and L. Waller, Single-shot quantitative phase microscop
 
 import numpy as np
 import cupy as cp
-from cupyx.scipy.ndimage import import_filter 
+from cupyx.scipy.ndimage import uniform_filter 
 #
 # from scipy.ndimage import uniform_filter
 

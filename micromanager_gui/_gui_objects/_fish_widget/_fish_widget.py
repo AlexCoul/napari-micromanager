@@ -1,8 +1,8 @@
 from __future__ import annotations
-from email.mime import image
 
 import warnings
 from pathlib import Path
+import json
 from typing import TYPE_CHECKING
 
 import useq
@@ -16,6 +16,8 @@ from ._fish_gui import FishWidgetGui
 
 import numpy as np
 import zarr
+import time
+from tqdm import trange
 from skimage.registration import phase_cross_correlation
 from distutils.util import strtobool
 import pandas as pd
@@ -28,6 +30,7 @@ from utils.fluidics_control import run_fluidic_program
 if TYPE_CHECKING:
     from pymmcore_plus.mda import PMDAEngine
 
+# TODO: add run fludics only, select / modify fluidic steps
 
 class FishWidget(FishWidgetGui):
     """Multi-dimensional acquisition Widget."""
@@ -93,21 +96,30 @@ class FishWidget(FishWidgetGui):
         self.n_iterative_rounds = 0
         self.fluidics_loaded = False
 
-        self.pump_COM_port = 'COM5'
-        self.valve_COM_port = 'COM6'
-        self.pump_parameters = {'pump_com_port': self.pump_COM_port,
-                                'pump_ID': 30,
-                                'verbose': True,
-                                'simulate_pump': False,
-                                'serial_verbose': False,
-                                'flip_flow_direction': False}
+        self.pump_COM_port = "COM4"
+        self.valve_COM_port = "COM6"
+        self.pump_parameters = {
+            "pump_com_port": self.pump_COM_port,
+            "pump_ID": 30,
+            "verbose": True,
+            "simulate_pump": False,
+            "serial_verbose": False,
+            "flip_flow_direction": False,
+        }
 
         # arduino controller parameters
-        self.arduino_port = 'COM17'
+        self.arduino_port = "COM11"
+        # we don't need all LEDs ON (ALIGN command) to compute DPC image
+        self.DPC_commands = ["DPC0", "DPC1", "DPC2", "DPC3"]  # , 'ALIGN\n']
+        self.n_DPC_illuminations = 4
+        self.codebook = {}
+        self.n_active_channels = 1  # we have 1 epifluo LED
 
         # tiling parameters
         self.stage_volume_set = False
-        self.overlap = .2
+        self.overlap = 0.2  # TODO: add choice of % tiles overlap
+        self.pixel_size = 0.065
+        self._update_n_images()
 
     def _update_mda_engine(self, newEngine: PMDAEngine, oldEngine: PMDAEngine):
         oldEngine.events.sequenceStarted.disconnect(self._on_mda_started)
@@ -155,16 +167,20 @@ class FishWidget(FishWidgetGui):
         )
 
     def _update_n_images(self):
-        step = self.step_size_doubleSpinBox.value()
-        # set what is the range to consider depending on the z_stack mode
-        if self.z_tabWidget.currentIndex() == 0:
-            _range = self.z_range_topbottom_doubleSpinBox.value()
-        if self.z_tabWidget.currentIndex() == 1:
-            _range = self.zrange_spinBox.value()
-        if self.z_tabWidget.currentIndex() == 2:
-            _range = self.z_range_abovebelow_doubleSpinBox.value()
-
-        self.n_images_label.setText(f"Number of Images: {round((_range / step) + 1)}")
+        if self.stack_groupBox.isChecked():
+            step = self.step_size_doubleSpinBox.value()
+            # set what is the range to consider depending on the z_stack mode
+            if self.z_tabWidget.currentIndex() == 0:
+                _range = self.z_range_topbottom_doubleSpinBox.value()
+            if self.z_tabWidget.currentIndex() == 1:
+                _range = self.zrange_spinBox.value()
+            if self.z_tabWidget.currentIndex() == 2:
+                _range = self.z_range_abovebelow_doubleSpinBox.value()
+            self.n_images_label.setText(
+                f"Number of Images: {round((_range / step) + 1)}"
+            )
+        else:
+            self.n_images_label.setText(f"Number of Images: 1")
 
     def _on_mda_started(self, sequence):
         self._set_enabled(False)
@@ -273,7 +289,7 @@ class FishWidget(FishWidgetGui):
         x_val = self.stage_tableWidget.item(curr_row, 0).text()
         y_val = self.stage_tableWidget.item(curr_row, 1).text()
         z_val = self.stage_tableWidget.item(curr_row, 2).text()
-        self._mmc.setXYPosition(float(x_val), float(y_val))
+        self._mmc.setXYPosition((float(x_val), float(y_val)))
         self._mmc.setPosition(self._mmc.getFocusDevice(), float(z_val))
 
     def set_multi_d_acq_dir(self):
@@ -284,154 +300,197 @@ class FishWidget(FishWidgetGui):
         self.fish_dir_lineEdit.setText(self.save_dir)
         self.parent_path = Path(self.save_dir)
 
-    def _connect_arduino(self):
-
-        self.arduino_port = init_arduino(self.arduino_com_port,baudrate=115200,timeout=0.1)
-    
-    def _disconnect_arduino(self):
-
-        self.arduino_port.close()
-
     def _calculate_scan_volume(self):
 
         # set experiment exposure
-        self._mmc.setExposure(self.exposure_ms)
-
+        self._mmc.setExposure(10.0)
         # snap image
-        self._mmc.snapImage()
-
-        # grab exposure
-        true_exposure = self._mmc.getExposure()
-
+        self._mmc.snap()
         # grab ROI
-        current_ROI =self._mmc.getROI()
+        current_ROI = self._mmc.getROI()
         self.x_pixels = current_ROI[2]
         self.y_pixels = current_ROI[3]
+        self.n_xy_positions = self.stage_tableWidget.rowCount()
 
-        # grab stage positions from widget
-        n_total_positions = self.stage_tableWidget.rowCount()
-        x_grid = np.zeros([n_total_positions],dtype=np.float32)
-        y_grid = np.zeros([n_total_positions],dtype=np.float32)
-        z_grid = np.zeros([n_total_positions],dtype=np.float32)
-        
-        for pos_idx in range(n_total_positions):
-            x_grid[pos_idx]= self.stage_tableWidget.item(pos_idx,0)
-            y_grid[pos_idx]= self.stage_tableWidget.item(pos_idx,1)
-            z_grid[pos_idx]= self.stage_tableWidget.item(pos_idx,2)
+        if self.rect_roi_checkBox.isChecked():
+            # grab stage positions from widget
+            x_grid = np.zeros([self.n_xy_positions], dtype=np.float32)
+            y_grid = np.zeros([self.n_xy_positions], dtype=np.float32)
+            z_grid = np.zeros([self.n_xy_positions], dtype=np.float32)
 
-        x_min = np.min(x_grid)
-        x_max = np.max(x_grid)
-        y_min = np.min(y_grid)
-        y_max = np.min(y_grid)
+            for pos_idx in range(self.n_xy_positions):
+                print(type(self.stage_tableWidget.item(pos_idx, 0).text()))
+                x_grid[pos_idx] = self.stage_tableWidget.item(pos_idx, 0).text()
+                y_grid[pos_idx] = self.stage_tableWidget.item(pos_idx, 1).text()
+                z_grid[pos_idx] = self.stage_tableWidget.item(pos_idx, 2).text()
 
-        # calculate number of X,Y positions assuming 20% overlap
-        self.overlap = 0.2
-        x_positions = np.linspace(x_min,x_max,self.pixel_size*self.x_pixels*self.overlap)
-        y_positions = np.linspace(y_min,y_max,self.pixel_size*self.y_pixels*self.overlap)
-        z_positions = np.mean(z_grid) * np.ones(x_positions.shape[0])
+            x_min = np.min(x_grid)
+            x_max = np.max(x_grid)
+            y_min = np.min(y_grid)
+            y_max = np.min(y_grid)
 
-        # calculate actual XY tile positions
-        x_grid, y_grid, z_grid = np.meshgrid(x_positions,y_positions,z_positions,indexing='xy')
+            # calculate number of X,Y positions assuming 20% overlap
+            x_positions = np.linspace(
+                x_min, x_max, self.pixel_size * self.x_pixels * self.overlap
+            )
+            y_positions = np.linspace(
+                y_min, y_max, self.pixel_size * self.y_pixels * self.overlap
+            )
+            z_positions = np.mean(z_grid) * np.ones(x_positions.shape[0])
 
-        xyz_positions = np.vstack([x_grid.ravel(), y_grid.ravel(), z_grid.ravel()])
+            # calculate actual XY tile positions
+            x_grid, y_grid, z_grid = np.meshgrid(
+                x_positions, y_positions, z_positions, indexing="xy"
+            )
+            self.xyz_stage_positions = np.vstack(
+                [x_grid.ravel(), y_grid.ravel(), z_grid.ravel()]
+            )
+        else:
+            self.xyz_stage_positions = np.zeros([self.n_xy_positions, 3])
+            for pos_idx in range(self.n_xy_positions):
+                self.xyz_stage_positions[pos_idx, 0] = self.stage_tableWidget.item(
+                    pos_idx, 0
+                ).text()
+                self.xyz_stage_positions[pos_idx, 1] = self.stage_tableWidget.item(
+                    pos_idx, 1
+                ).text()
+                self.xyz_stage_positions[pos_idx, 2] = self.stage_tableWidget.item(
+                    pos_idx, 2
+                ).text()
 
         # calculate Z positions
-        n_z_positions = np.abs(self.z_top_doubleSpinBox-self.z_bottom_doubleSpinBox)/self.step_size_doubleSpinBox
+        if self.stack_groupBox.isChecked():
+            self.z_step = self.step_size_doubleSpinBox.value()
+            if self.z_tabWidget.currentIndex() == 0:
+                self.z_start = self.z_bottom_doubleSpinBox.value()
+                self.z_end = self.z_top_doubleSpinBox.value()
+            elif self.z_tabWidget.currentIndex() == 1:
+                self.z_start = -self.zrange_spinBox.value() / 2
+                self.z_end = self.zrange_spinBox.value() / 2
+            elif self.z_tabWidget.currentIndex() == 2:
+                self.z_start = self.below_doubleSpinBox.value()
+                self.z_end = self.above_doubleSpinBox.value()
 
+            self.n_z_positions = int(
+                np.ceil(np.abs(self.z_end - self.z_start) / self.z_step)
+            )
+            self.z_displacements = np.linspace(
+                self.z_end, self.z_start, self.n_z_positions
+            )
+        else:
+            self.z_start = 0
+            self.z_end = 0
+            self.z_step = 0
+            self.n_z_positions = 1
+            self.z_displacements = np.array([0])
+
+        print(f"n_z_positions {self.n_z_positions}")
+        print(f"z_end {self.z_end}")
+        print(f"z_start {self.z_start}")
+        print(f"z_step {self.z_step}")
+
+        # to save experiment parameters latter
+        self.x_min_position = self.xyz_stage_positions[:, 0].min()
+        self.x_max_position = self.xyz_stage_positions[:, 0].max()
+        self.y_min_position = self.xyz_stage_positions[:, 1].min()
+        self.y_max_position = self.xyz_stage_positions[:, 1].max()
+        self.n_x_positions = np.unique(self.xyz_stage_positions[:, 0]).size
+        self.n_y_positions = np.unique(self.xyz_stage_positions[:, 1]).size
+        self.n_xy_tiles = len(self.xyz_stage_positions)
 
     # load fluidics and codebook files
     def _load_fluidics(self):
         try:
-            self.df_fluidics = data_io.read_fluidics_program(self.fluidics_file_path)
-            self.codebook = data_io.read_config_file(self.codebook_file_path)
+            # self.df_fluidics = self._read_fluidics_program(Path(self.fluidics_cfg.text()))
+            file_path = Path(
+                r"C:\Users\qi2lab\Documents\GitHub\napari-micromanager\micromanager_gui\_gui_objects\_fish_widget\no_fluids.csv"
+            )
+            # self.df_fluidics = self._read_fluidics_program(file_path))
+            self.df_fluidics = pd.read_csv(file_path)
+            # self.codebook = self._read_config_file(self.codebook_file_path)
+            self.n_iterative_rounds = self.df_fluidics["round"].max()
             self.fluidics_loaded = True
+            print("Fluidics program loaded")
+            print(self.df_fluidics)
         except:
-            raise Exception('Error in loading fluidics and/or codebook files.')
+            raise Exception("Error in loading fluidics and/or codebook files.")
 
-    # generate summary of fluidics and codebook files
-    def _generate_fluidics_summary(self):
+    # # generate summary of fluidics and codebook files
+    # def _generate_fluidics_summary(self):
+    #     # TODO: finish adapting this summary from the OPM setup
+    #     self.n_iterative_rounds = int(self.codebook['n_rounds'])
+    #     if (self.n_iterative_rounds == int(self.df_fluidics['round'].max())):
 
-        self.n_iterative_rounds = int(self.codebook['n_rounds'])
-        if (self.n_iterative_rounds == int(self.df_fluidics['round'].max())):
+    #         self.n_active_channels_readout = int(self.codebook['channels_per_round'])
+    #         self.channel_states_readout = [
+    #             ch_name for ch_name, ch_dic in self.codebook["channel_states_readout"] \
+    #             if ch_dic["used"] == "True"]
 
-            self.n_active_channels_readout = int(self.codebook['channels_per_round'])
-            self.channel_states_readout = [
-                bool(strtobool(self.codebook['DPC'])),
-                bool(strtobool(self.codebook['cy5']))]
+    #         if not(self.codebook['nuclei_round']==-1):
+    #             self.n_active_channels_nuclei = 2
+    #             self.channel_states_nuclei = [
+    #                 True,
+    #                 True]
 
-            if not(self.codebook['nuclei_round']==-1):
-                self.n_active_channels_nuclei = 2
-                self.channel_states_nuclei = [
-                    True,
-                    True]
+    #         fluidics_data = (f"Experiment type: {str(self.codebook['type'])} \n"
+    #                         f"Number of iterative rounds: {str(self.codebook['n_rounds'])} \n\n"
+    #                         f"Number of targets: {str(self.codebook['n_targets'])} \n"
+    #                         f"Channels per round: {str(self.codebook['dyes_per_round'])} \n"
+    #                         f"DPC fiduciual: {str(self.codebook['alexa488'])} \n"
+    #                         f"Cy5 readout: {str(self.codebook['alexa647'])} \n"
+    #                         f"Nuclear marker round: {str(self.codebook['nuclei_round'])} \n\n")
+    #         self.fluidics_summary = fluidics_data
+    #     else:
+    #         raise Exception('Number of rounds in codebook file and fluidics file do not match.')
 
-            fluidics_data = (f"Experiment type: {str(self.codebook['type'])} \n"
-                            f"Number of iterative rounds: {str(self.codebook['n_rounds'])} \n\n"
-                            f"Number of targets: {str(self.codebook['targets'])} \n"
-                            f"Channels per round: {str(self.codebook['dyes_per_round'])} \n"
-                            f"DPC fidicual: {str(self.codebook['alexa488'])} \n"
-                            f"Cy5 readout: {str(self.codebook['alexa647'])} \n"
-                            f"Nuclear marker round: {str(self.codebook['nuclei_round'])} \n\n")
-            self.fluidics_summary.value = fluidics_data
-        else:
-            raise Exception('Number of rounds in codebook file and fluidics file do not match.')
+    # # generate summary of experimental setup
+    # TODO: finish adapting summaries from the OPM control code
+    # def _generate_experiment_summary(self):
 
-    # generate summary of experimental setup
-    def _generate_experiment_summary(self):
+    #     exp_data = (f"Number of iterative rounds: {str(self.n_iterative_rounds)} \n\n"
+    #                 f"X start: {str(self.x_min_position)}  \n"
+    #                 f"X end:  {str(self.x_max_position)} \n"
+    #                 f"Number of X tiles:  {str(self.n_x_positions)} \n"
+    #                 f"Y start: {str(self.y_min_position)}  \n"
+    #                 f"Y end:  {str(self.y_max_position)} \n"
+    #                 f"Number of Y tiles:  {str(self.n_y_positions)} \n"
+    #                 f"Z start: {str(self.z_bottom_doubleSpinBox)}  \n"
+    #                 f"Z end:  {str(self.z_top_doubleSpinBox)} \n"
+    #                 f"Number of Z positions:  {str(self.z_step)} \n\n"
+    #                 f"--------Readout rounds------- \n"
+    #                 f"Number of channels:  {str(self.n_active_channels_readout)} \n"
+    #                 f"Active channels: {str(self.channel_states_readout)} \n\n"
+    #                 f"--------Nuclei rounds------- \n"
+    #                 f"Number of channels: {str(self.n_active_channels_nuclei)} \n"
+    #                 f"Active channels: {str(self.channel_states_nuclei)} \n\n")
+    #     self.experiment_summary = exp_data
 
-        exp_data = (f"Number of iterative rounds: {str(self.n_iterative_rounds)} \n\n"
-                    f"X start: {str(self.x_min_position)}  \n"
-                    f"X end:  {str(self.x_max_position)} \n"
-                    f"Number of X tiles:  {str(self.n_x_positions)} \n"
-                    f"Y start: {str(self.y_min_position)}  \n"
-                    f"Y end:  {str(self.y_max_position)} \n"
-                    f"Number of Y tiles:  {str(self.n_y_positions)} \n"
-                    f"Z start: {str(self.z_bottom_doubleSpinBox)}  \n"
-                    f"Z end:  {str(self.z_top_doubleSpinBox)} \n"
-                    f"Number of Z positions:  {str(self.z_step)} \n\n"
-                    f"--------Readout rounds------- \n"
-                    f"Number of channels:  {str(self.n_active_channels_readout)} \n"
-                    f"Active channels: {str(self.channel_states_readout)} \n\n"
-                    f"--------Nuclei rounds------- \n"
-                    f"Number of channels: {str(self.n_active_channels_nuclei)} \n"
-                    f"Active channels: {str(self.channel_states_nuclei)} \n\n")
-        self.experiment_summary.value = exp_data
+    # def _save_round_metadata(self,r_idx):
+    #     """
+    #     Construct round metadata dictionary and save
+    #     :param r_idx: int
+    #         round index
+    #     :return None:
+    #     """
 
-    def _save_round_metadata(self,r_idx):
-        """
-        Construct round metadata dictionary and save
-        :param r_idx: int
-            round index
-        :return None:
-        """
+    #     scan_param_data = [{'root_name': str("WF_stage_metadata"),
+    #                         'scan_type': 'WF',
+    #                         'exposure_ms': float(self._mmc.getExposure()),
+    #                         'pixel_size': float(self.pixel_size),
+    #                         'r_idx': int(r_idx),
+    #                         'num_r': int(self.n_iterative_rounds),
+    #                         'num_xy': int(self.n_xy_tiles),
+    #                         'num_z': int(self.n_z_positions),
+    #                         'num_ch': int(self.n_active_channels_readout),
+    #                         'y_pixels': int(self.y_pixels),
+    #                         'x_pixels': int(self.x_pixels),
+    #                         'DPC_active': bool(self.channel_states[0]),
+    #                         'Cy5_active': bool(self.channel_states[1])
+    #                         }]
 
-        scan_param_data = [{'root_name': str("WF_stage_metadata"),
-                            'scan_type': 'WF',
-                            'exposure_ms': float(self.exposure_ms),
-                            'pixel_size': float(self.camera_pixel_size_um),
-                            'x_axis_start': float(self.scan_axis_start_um),
-                            'x_axis_end': float(self.scan_axis_end_um),
-                            'x_axis_step': float(self.scan_axis_step_um), 
-                            'y_axis_start': float(self.tile_axis_start_um),
-                            'y_axis_end': float(self.tile_axis_end_um),
-                            'y_axis_step': float(self.tile_axis_step_um),
-                            'z_axis_start': float(self.height_axis_start_um),
-                            'z_axis_end': float(self.height_axis_end_um),
-                            'z_axis_step': float(self.height_axis_step_um),
-                            'r_idx': int(r_idx),
-                            'num_r': int(self.n_iterative_rounds),
-                            'num_xy': int(self.n_xy_tiles), 
-                            'num_z': int(self.n_z_tiles),
-                            'num_ch': int(self.n_active_channels),
-                            'y_pixels': int(self.y_pixels),
-                            'x_pixels': int(self.x_pixels),
-                            'DPC_active': bool(self.channel_states[0]),
-                            'Cy5_active': bool(self.channel_states[1])
-                            }]
-        
-        self._write_metadata(scan_param_data[0], self.metadata_dir_path / Path('scan_'+str(r_idx).zfill(3)+'_metadata.csv'))
+    #     self._write_metadata(scan_param_data[0], self.metadata_dir_path / f'scan_metadata_r{r_idx:03}.csv'
 
-    def _save_stage_positions(self,r_idx,tile_xy_idz,tile_z_idx,current_stage_data):
+    def _save_stage_positions(self, r_idx, tile_xy_idz, current_stage_data, z_offsets):
         """
         Construct stage position metadata dictionary and save
         :param r_idx: int
@@ -445,40 +504,46 @@ class FishWidget(FishWidgetGui):
         :return None:
         """
 
-        self._write_metadata(current_stage_data[0], self.metadata_dir_path / Path('stage_r'+str(r_idx).zfill(3)+'_xy'+str(tile_xy_idz).zfill(3)+'_z'+str(tile_z_idx).zfill(3)+'_metadata.csv'))
-        
+        file_path = self.metadata_dir_path / f"WF_stage_positions_r{r_idx:03}.json"
+        dico_metadata = {
+            "r_idx": r_idx,
+            "xy_idx": tile_xy_idz,
+            "actual_stage_positions": current_stage_data[r_idx, :].tolist(),
+            "z_offset": z_offsets[r_idx, :].tolist(),
+        }
+        print(dico_metadata)
+        # pd.DataFrame(dico_metadata).to_csv(file_path)
+        try:
+            with open(file_path, "w") as write_file:
+                json.dump(dico_metadata, write_file, indent=4)
+        except TypeError as err:
+            print("TypeError:", err, "\n dumping a text file instead")
+            with open(file_path, "w") as write_file:
+                json.dumps(str(dico_metadata), write_file)
+
     def _read_fluidics_program(program_path):
         """
         Read fluidics program from CSV file as pandas dataframe
         :param program_path: Path
             location of fluidics program
         :return df_program: Dataframe
-            dataframe containing fluidics program 
+            dataframe containing fluidics program
         """
 
         df_program = pd.read_csv(program_path)
+        if "Unnamed: 0" in df_program.columns:
+            df_program.index = df_program["Unnamed: 0"]
+            df_program.drop(columns=["Unnamed: 0"], inplace=True)
         return df_program
-    
-    def _write_metadata(data_dict, save_path):
-        """
-        Write metadata file as csv
-        :param data_dict: dict
-            dictionary of metadata entries
-        :param save_path: Path
-            path for file
-        :return None:
-        """
 
-        pd.DataFrame([data_dict]).to_csv(save_path)
-
-    
     def _on_run_clicked(self):
 
         if len(self._mmc.getLoadedDevices()) < 2:
             raise ValueError("Load a MM cfg file first.")
-            
-        if self.fluidics_cfg is None:
-            raise ValueError("Load a fluidics cfg first.")
+
+        # issue with FishWidget has no attribute self.fluidics_cfg
+        # if self.fluidics_cfg.text() is None:
+        #     raise ValueError("Load a fluidics cfg first.")
 
         if self.channel_tableWidget.rowCount() <= 0:
             raise ValueError("Select at least one channel.")
@@ -491,14 +556,16 @@ class FishWidget(FishWidgetGui):
             )
 
         if not (
-            self.fish_fname_lineEdit.text() and Path(self.fish_dir_lineEdit.text()).is_dir()
+            self.fish_fname_lineEdit.text()
+            and Path(self.fish_dir_lineEdit.text()).is_dir()
         ):
             raise ValueError("Select a filename and a valid directory.")
-
 
         # load fluidics program
         self._load_fluidics()
 
+        # set output path
+        output_dir_path = Path(self.fish_dir_lineEdit.text())
 
         if self.fluidics_loaded:
             # connect to pump
@@ -510,19 +577,23 @@ class FishWidget(FishWidgetGui):
             self.valve_controller = HamiltonMVP(com_port=self.valve_COM_port)
             # initialize valves
             self.valve_controller.autoAddress()
+            print("Fluidics initialized succesfully")
 
         else:
-            raise Exception('Configure fluidics first.')
-        
+            raise Exception("Configure fluidics first.")
+
+        self.run_DPC = self.checkBox_dpc_autofocus.isChecked()
+        # create stage tiling positions
+        print("calculate scan volume")
+        self._calculate_scan_volume()
 
         # create metadata directory in output directory
-        self.metadata_dir_path = output_dir_path / Path('metadata')
+        self.metadata_dir_path = output_dir_path / "metadata"
         self.metadata_dir_path.mkdir(parents=True, exist_ok=True)
 
         # create zarr data directory in output directory
-        zarr_dir_path = output_dir_path / Path('raw_data')
+        zarr_dir_path = output_dir_path / "raw_data"
         zarr_dir_path.mkdir(parents=True, exist_ok=True)
-
 
         # setup circular buffer to be large
         self._mmc.clearCircularBuffer()
@@ -530,222 +601,284 @@ class FishWidget(FishWidgetGui):
         self._mmc.setCircularBufferMemoryFootprint(int(circ_buffer_mb))
         self._mmc.setTimeoutMs(120000)
 
+        # arrays to track xyz stage position and z offsets
+        actual_stage_positions = np.zeros(
+            [self.n_iterative_rounds, self.n_xy_positions, 3], dtype=np.float32
+        )
+        z_offsets = np.zeros(
+            [self.n_iterative_rounds, self.n_xy_positions], dtype=np.float32
+        )
 
         # loop through rounds
+        print(f"Starting iterating over {self.n_iterative_rounds} rounds")
         for r_idx in range(self.n_iterative_rounds):
 
             # run fluidics for this round
-            success_fluidics = False          
-            success_fluidics = run_fluidic_program(r_idx,self.df_fluidics,self.valve_controller,self.pump_controller)
-            if not(success_fluidics):
-                raise Exception('Error in fluidics unit.')
+            success_fluidics = False
+            print(f"run fluidics round {r_idx}")
+            success_fluidics = run_fluidic_program(
+                r_idx, self.df_fluidics, self.valve_controller, self.pump_controller
+            )
+            if not (success_fluidics):
+                raise Exception("Error in fluidics unit.")
 
             # On the first round, acquire z stack using DPC only to create "ground truth" map of tissue
-            if r_idx ==0:
-
+            if r_idx == 0 and self.run_DPC:
+                print("make first DPC images")
                 # set zarr path for this round
-                dpc_fidicual_zarr_output_path = zarr_dir_path / Path('DPC_fidicual_r'+str(r_idx).zfill(3)+'_xy'+str(xy_idx).zfill(3)+'.zarr')
-                
+                # filename = f'DPC_fidicual_r{r_idx:03}_xy{xy_idx:03}.zarr'
+                filename = f"DPC_fidicual_r{r_idx:03}.zarr"
+                dpc_fidicual_zarr_output_path = zarr_dir_path / filename
+
                 # create and open zarr file
                 dpc_fidicual_data = zarr.open(
-                    str(dpc_fidicual_zarr_output_path), 
-                    mode="w", 
-                    shape=(self.n_xy_positions, self.n_z_positions, self.y_pixels, self.x_pixels), 
+                    str(dpc_fidicual_zarr_output_path),
+                    mode="w",
+                    shape=(
+                        self.n_xy_positions,
+                        (self.n_DPC_illuminations + self.n_DPC_illuminations // 2),
+                        self.n_z_positions,
+                        self.y_pixels,
+                        self.x_pixels,
+                    ),
                     chunks=(1, 1, 1, self.y_pixels, self.x_pixels),
-                    dtype=np.float32)
+                    dtype=np.float32,
+                )
 
-                for xy_idx in trange(self.n_xy_tiles,desc="xy tile",position=0):
+                for xy_idx in trange(self.n_xy_tiles, desc="xy tile", position=0):
 
-                # set XY stage position
+                    # set XY stage position
+                    self._mmc.setXYPosition(
+                        self.xyz_stage_positions[xy_idx, 0],
+                        self.xyz_stage_positions[xy_idx, 1],
+                    )
 
-                    for z_idx in trange(self.n_z_tiles,desc="z position",position=1,leave=False):
+                    # move to middle of z stack
+                    self._mmc.setPosition(
+                        self._mmc.getFocusDevice(), self.xyz_stage_positions[xy_idx, 2]
+                    )
 
-                        # set Z stage position
+                    for z_idx in trange(
+                        self.n_z_positions, desc="z position", position=1, leave=False
+                    ):
 
-                        raw_dpc_images = np.zeros([4,self.y_pixels,self.x_pixels],dtype=np.uint16)
-                        dpc_images = np.zeros([2,self.y_pixels,self.x_pixels],dtype=np.float32)
-                        final_dpc_image = np.zeros([self.y_pixels,self.x_pixels],dtype=np.float32)
-                        for ch_idx in range(self.n_DPC_illuminations):
+                        # set Z stage position taking offset into account
+                        current_z_position = (
+                            self.xyz_stage_positions[xy_idx, 2]
+                            + self.z_displacements[z_idx]
+                        )
+                        self._mmc.setPosition(
+                            self._mmc.getFocusDevice(), current_z_position
+                        )
 
-                            # set Arduino command
-                            command = self.DPC_illumination_commands[dpc_idx]
-                            set_state(self.arduino_port,command)
+                        raw_dpc_images = np.zeros(
+                            [4, self.y_pixels, self.x_pixels], dtype=np.uint16
+                        )
+                        for dpc_idx in range(self.n_DPC_illuminations):
+                            # set channel to current DPC illumination
+                            self._mmc.setConfig("Arduino", self.DPC_commands[dpc_idx])
 
                             # snap image
-                            raw_dpc_images[ch_idx,:] = self._mmc.snapImage()
+                            raw_dpc_images[dpc_idx, :] = self._mmc.snap()
+                            time.sleep(0.5)
+                            # set channel to OFF
+                            self._mmc.setConfig("Arduino", "OFF")
 
-                            # turn off illumination
-                            command = "OFF\n"
-                            set_state(self.arduino_port,command)
-                            
+                        dpc_fidicual_data[xy_idx, 0, z_idx, :, :] = (
+                            raw_dpc_images[1] - raw_dpc_images[0]
+                        ) / (raw_dpc_images[1] + raw_dpc_images[0])
+                        dpc_fidicual_data[xy_idx, 1, z_idx, :, :] = (
+                            raw_dpc_images[3] - raw_dpc_images[2]
+                        ) / (raw_dpc_images[3] + raw_dpc_images[2])
+                        dpc_fidicual_data[xy_idx, 2:6, z_idx, :, :] = raw_dpc_images
 
-                        dpc_images[0,:] = (raw_dpc_images[1]-raw_dpc_images[0])/(raw_dpc_images[1]+raw_dpc_images[0])
-                        dpc_images[1,:] = (raw_dpc_images[3]-raw_dpc_images[2])/(raw_dpc_images[3]+raw_dpc_images[2])
-                        final_dpc_image = np.max(dpc_images,0) # is this the right way to merge DPC images? Or should we take mean?
+            for xy_idx in trange(self.n_xy_positions, desc="xy tile", position=0):
+                # create and open zarr file
+                if self.run_DPC:
+                    dpc_zarr_output_path = (
+                        zarr_dir_path / f"DPC_data_r{r_idx:03}_xy{xy_idx:03}.zarr"
+                    )
+                    dpc_round_data = zarr.open(
+                        str(dpc_zarr_output_path),
+                        mode="w",
+                        shape=(
+                            self.n_xy_positions,
+                            (self.n_DPC_illuminations + self.n_DPC_illuminations // 2),
+                            self.n_z_positions,
+                            self.y_pixels,
+                            self.x_pixels,
+                        ),
+                        chunks=(1, 1, 1, self.y_pixels, self.x_pixels),
+                        dtype=np.float32,
+                    )
 
-                        dpc_fidicual_data[xy_idx, 0, z_idx, :, :] = final_dpc_image
-
-            # set zarr path for this round
-            dpc_zarr_output_path = zarr_dir_path / Path('DPC_data_r'+str(r_idx).zfill(3)+'_xy'+str(xy_idx).zfill(3)+'.zarr')
-            flr_zarr_output_path = zarr_dir_path / Path('FLR_data_r'+str(r_idx).zfill(3)+'_xy'+str(xy_idx).zfill(3)+'.zarr')
-            
-            # create and open zarr file
-
-            dpc_round_data = zarr.open(
-                str(dpc_zarr_output_path), 
-                mode="w", 
-                shape=(self.n_xy_positions, self.n_z_positions, self.y_pixels, self.x_pixels), 
-                chunks=(1, 1, 1, self.y_pixels, self.x_pixels),
-                dtype=np.float32)
-
-            flr_round_data = zarr.open(
-                str(flr_zarr_output_path), 
-                mode="w", 
-                shape=(self.n_xy_positions, self.n_z_positions, self.y_pixels, self.x_pixels), 
-                chunks=(1, 1, 1, self.y_pixels, self.x_pixels),
-                dtype=np.uint16)
-
-            for xy_idx in trange(self.n_xy_tiles,desc="xy tile",position=0):
+                flr_zarr_output_path = (
+                    zarr_dir_path / f"FLR_data_r{r_idx:03}_xy{xy_idx:03}.zarr"
+                )
+                flr_round_data = zarr.open(
+                    str(flr_zarr_output_path),
+                    mode="w",
+                    shape=(
+                        self.n_xy_positions,
+                        self.n_z_positions,
+                        self.y_pixels,
+                        self.x_pixels,
+                    ),
+                    chunks=(1, 1, self.y_pixels, self.x_pixels),
+                    dtype=np.uint16,
+                )
 
                 # set XY stage position
-
+                self._mmc.setXYPosition(
+                    self.xyz_stage_positions[xy_idx, 0],
+                    self.xyz_stage_positions[xy_idx, 1],
+                )
 
                 # move to middle of z stack
-
+                self._mmc.setPosition(
+                    self._mmc.getFocusDevice(), self.xyz_stage_positions[xy_idx, 2]
+                )
 
                 # capture DPC image at middle of stack
-                raw_dpc_images = np.zeros([4,self.y_pixels,self.x_pixels],dtype=np.uint16)
-                dpc_images = np.zeros([2,self.y_pixels,self.x_pixels],dtype=np.float32)
-                final_dpc_image = np.zeros([self.y_pixels,self.x_pixels],dtype=np.float32)
-                for dpc_idx in range(self.n_DPC_illuminations):
+                raw_dpc_images = np.zeros(
+                    [4, self.y_pixels, self.x_pixels], dtype=np.uint16
+                )
+                if self.run_DPC:
+                    dpc_images = np.zeros(
+                        [2, self.y_pixels, self.x_pixels], dtype=np.float32
+                    )
+                    for dpc_idx in range(self.n_DPC_illuminations):
+                        # set channel to current DPC illumination
+                        self._mmc.setConfig("Arduino", self.DPC_commands[dpc_idx])
 
-                    # set Arduino command
-                    command = self.DPC_illumination_commands[dpc_idx]
-                    set_state(self.arduino_port,command)
+                        # snap image
+                        raw_dpc_images[dpc_idx, :] = self._mmc.snap()
+                        time.sleep(0.5)
 
-                    # snap image
-                    raw_dpc_images[ch_idx,:] = self._mmc.snapImage()
+                        # set channel to OFF
+                        self._mmc.setConfig("Arduino", "OFF")
 
-                    # turn off illumination
-                    command = "OFF\n"
-                    set_state(self.arduino_port,command)
+                    dpc_images[0, :] = (raw_dpc_images[1] - raw_dpc_images[0]) / (
+                        raw_dpc_images[1] + raw_dpc_images[0]
+                    )
+                    dpc_images[1, :] = (raw_dpc_images[3] - raw_dpc_images[2]) / (
+                        raw_dpc_images[3] + raw_dpc_images[2]
+                    )
 
-                dpc_images[0,:] = (raw_dpc_images[1]-raw_dpc_images[0])/(raw_dpc_images[1]+raw_dpc_images[0])
-                dpc_images[1,:] = (raw_dpc_images[3]-raw_dpc_images[2])/(raw_dpc_images[3]+raw_dpc_images[2])
-                final_dpc_image = np.max(dpc_images,0) # is this the right way to merge DPC images? Or should we take mean?
+                    # run 2D cross-correlation for each Z plane
+                    shifts = np.zeros([2, self.n_z_positions, 2], dtype=np.float32)
+                    errors = np.zeros([2, self.n_z_positions, 1], dtype=np.float32)
+                    for z_idx in range(self.n_z_positions):
+                        print(f"compute phase cross correlation for z_idx {z_idx}")
+                        (
+                            shifts[0, z_idx, :],
+                            errors[0, z_idx],
+                            _,
+                        ) = phase_cross_correlation(
+                            dpc_fidicual_data[xy_idx, 0, z_idx, :],
+                            dpc_images[0, :],
+                            upsample_factor=10,
+                            return_error=True,
+                        )
+                        (
+                            shifts[1, z_idx, :],
+                            errors[1, z_idx],
+                            _,
+                        ) = phase_cross_correlation(
+                            dpc_fidicual_data[xy_idx, 1, z_idx, :],
+                            dpc_images[1, :],
+                            upsample_factor=10,
+                            return_error=True,
+                        )
 
-                # run 2D cross-correlation for each Z plane
-                shifts = np.zeros([self.n_z_positions,2],dtype=np.float32)
-                errors = np.zer([self.n_z_positions,1],dtype=np.float32)
-                for z_idx in range(self.n_z_positions):
-                    shifts[z_idx,:], errors[z_idx], _ = phase_cross_correlation(dpc_fidicual_data[xy_idx,z_idx,:],
-                                                                               final_dpc_image,
-                                                                               upsample_factor=10,
-                                                                               return_error=True)
+                    # find best Z plane
+                    if len(errors) > 0:  # if there is no error in phase CC
+                        best_z_idx = np.amin(np.sum(errors, 0))
+                    else:
+                        best_z_idx = None
 
-                # calculate XY drift
-                x_drift = np.mean(shifts[0,:])
-                y_drift = np.mean(shifts[1,:])
-
-                # find best Z plane
-                best_z_idx = np.amin(errors)
-
-                # calculate shift from fidicual stack
-                if best_z_idx > n_z_positions//2:
-                    current_z_offset = -1 * (n_z_positions//2 - best_z_idx) * self.step_size_doubleSpinBox
-                elif best_z_idx < n_z_positions//2:
-                    current_z_offset = 1 * (n_z_positions//2 - best_z_idx) * self.step_size_doubleSpinBox
+                    # calculate shift from fidicual stack
+                    current_z_offset = 0
+                    if best_z_idx is not None:
+                        if best_z_idx > self.n_z_positions // 2:
+                            current_z_offset = (
+                                -1
+                                * (self.n_z_positions // 2 - best_z_idx)
+                                * self.z_step
+                            )
+                        elif best_z_idx < self.n_z_positions // 2:
+                            current_z_offset = (
+                                1 * (self.n_z_positions // 2 - best_z_idx) * self.z_step
+                            )
                 else:
                     current_z_offset = 0
 
                 # store Z offset for this position
-                z_offsets[r_idx,xy_idx] = current_z_offset
+                z_offsets[r_idx, xy_idx] = current_z_offset
 
-                for z_idx in trange(self.n_z_tiles,desc="z position",position=1,leave=False):
+                # grab actual stage positions
+                current_x, current_y = np.asarray(self._mmc.getXYPosition())
+                current_z = self._mmc.getZPosition()
+                actual_stage_positions[r_idx, xy_idx, 0] = current_x
+                actual_stage_positions[r_idx, xy_idx, 1] = current_y
+                actual_stage_positions[r_idx, xy_idx, 2] = current_z
+
+                for z_idx in trange(
+                    self.n_z_positions, desc="z position", position=1, leave=False
+                ):
 
                     # set Z stage position taking offset into account
+                    current_z_position = (
+                        self.xyz_stage_positions[xy_idx, 2]
+                        + self.z_displacements[z_idx]
+                        + z_offsets[r_idx, xy_idx]
+                    )
+                    self._mmc.setPosition(
+                        self._mmc.getFocusDevice(), current_z_position
+                    )
 
                     # capture DPC image at this position
-                    raw_dpc_images = np.zeros([4,self.y_pixels,self.x_pixels],dtype=np.uint16)
-                    dpc_images = np.zeros([2,self.y_pixels,self.x_pixels],dtype=np.float32)
-                    final_dpc_image = np.zeros([self.y_pixels,self.x_pixels],dtype=np.float32)
-                    for dpc_idx in range(self.n_DPC_illuminations):
+                    if self.run_DPC:
+                        raw_dpc_images = np.zeros(
+                            [4, self.y_pixels, self.x_pixels], dtype=np.uint16
+                        )
+                        for dpc_idx in range(self.n_DPC_illuminations):
 
-                        # set Arduino command
-                        command = self.DPC_illumination_commands[dpc_idx]
-                        set_state(self.arduino_port,command)
+                            # set channel to current DPC illumination
+                            self._mmc.setConfig("Arduino", self.DPC_commands[dpc_idx])
 
-                        # snap image
-                        raw_dpc_images[ch_idx,:] = self._mmc.snapImage()
+                            # snap image
+                            raw_dpc_images[dpc_idx, :] = self._mmc.snap()
+                            time.sleep(0.05)
 
-                        # turn off illumination
-                        command = "OFF\n"
-                        set_state(self.arduino_port,command)
+                            # set channel to OFF
+                            self._mmc.setConfig("Arduino", "OFF")
 
-                    dpc_images[0,:] = (raw_dpc_images[1]-raw_dpc_images[0])/(raw_dpc_images[1]+raw_dpc_images[0])
-                    dpc_images[1,:] = (raw_dpc_images[3]-raw_dpc_images[2])/(raw_dpc_images[3]+raw_dpc_images[2])
-                    final_dpc_image = np.max(dpc_images,0) # is this the right way to merge DPC images? Or should we take mean?
-
-                    dpc_round_data[xy_idx, 0, z_idx, :, :] = final_dpc_image
+                        # TODO: use numba to use JIT or GPU function
+                        dpc_round_data[xy_idx, 0, z_idx, :, :] = (
+                            raw_dpc_images[1] - raw_dpc_images[0]
+                        ) / (raw_dpc_images[1] + raw_dpc_images[0])
+                        dpc_round_data[xy_idx, 1, z_idx, :, :] = (
+                            raw_dpc_images[3] - raw_dpc_images[2]
+                        ) / (raw_dpc_images[3] + raw_dpc_images[2])
+                        dpc_round_data[xy_idx, 2:6, z_idx, :, :] = raw_dpc_images
 
                     # capture red LED fluorescence image at this xyz position
-
-                    # set Arduino command
-                    command = self.LED_illumination_command
-                    set_state(self.arduino_port,command)
-
+                    # set channel to LED
+                    self._mmc.setConfig("Arduino", "LED")
                     # snap image
-                    flr_round_data[xy_idx, z_idx, :, :] = self._mmc.snapImage()
-                    time.sleep(.05)
+                    flr_round_data[xy_idx, z_idx, :, :] = self._mmc.snap()
+                    time.sleep(0.05)
+                    # set channel to OFF
+                    self._mmc.setConfig("Arduino", "OFF")
 
-                    # turn off illumination
-                    command = "OFF\n"
-                    set_state(self.arduino_port,command)
-
-            self._save_stage_positions(r_idx,xy_idx,z_idx,round_stage_data,z_offsets[r_idx,:])
+            self._save_stage_positions(r_idx, xy_idx, actual_stage_positions, z_offsets)
             dpc_round_data = None
             flr_round_data = None
-            del opm_round_data, flr_round_data
+            del dpc_round_data, flr_round_data
+        print("Iteration over rounds completed")
 
         # write full metadata
-        self._save_full_metadata()
+        # self._save_full_metadata()
 
-
-        # Iterative FISH experiment:
-        # process fluidics cfg file
-        # generate stage positions, XY and Z
-        # save metadata
-        # prepare empty zarr file?
-        # run first round
-        # if DPC, acquire whole 3D ROI reference image (same time as fluidics?)
-        # fluo acquisition:
-        #     for pos_id in positions:
-        #         # run DPC autofocus:
-        #         for z_id in z_levels:
-        #             for LED_side in [left, right, both]:
-        #                 get image
-        #             make DPC image
-        #         stack images in z
-        #         perform fourier cross-correlation with reference image at this XY position
-        #         save X,Y,Z shifts
-        #         # run fluo imaging
-        #         for z_id in z_levels:
-        #             for c_id in channels:
-        #                 get image
-        #                 save in zarr
-        # 
-
-
-        # experiment = self.get_state()
-        # Alexis: I think we can't use MDA experiment per round because we need to perform
-        # DPC-based autofocus, and that requires (for  now) some manual handling of acquisitions
-        # SEQUENCE_META[experiment] = SequenceMeta(
-        #     mode="mda",
-        #     split_channels=self.checkBox_split_channels.isChecked(),
-        #     should_save=self.save_groupBox.isChecked(),
-        #     file_name=self.fish_fname_lineEdit.text(),
-        #     save_dir=self.fish_dir_lineEdit.text(),
-        #     save_pos=self.checkBox_save_pos.isChecked(),
-        # )
-        # self._mmc.run_mda(experiment)  # run the MDA experiment asynchronously
         return

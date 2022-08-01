@@ -48,7 +48,7 @@ class PresetsWidget(QWidget):
         self.layout().setContentsMargins(0, 0, 0, 0)
         self.layout().addWidget(self._combo)
         self._combo.currentTextChanged.connect(self._on_combo_changed)
-        self._combo.textActivated.connect(self._on_text_activate)
+        self._combo.activated.connect(self._on_text_activate)
 
         self._mmc.events.configSet.connect(self._on_cfg_set)
         self._mmc.events.systemConfigurationLoaded.connect(self.refresh)
