@@ -207,12 +207,17 @@ class FishWidgetGui(QWidget):
         self.checkBox_split_channels = QCheckBox(text="Split Channels")
         # checkbox
         self.checkBox_dpc_autofocus = QCheckBox(text="Run DPC autofocus")
+        self.dpc_expo_label = QLabel(text="DPC expo (ms)")
+        self.dpc_expo_edit = QLineEdit()
+        self.dpc_expo_edit.setText("500")
 
         group_layout.addWidget(self.add_ch_Button, 0, 1, 1, 1)
         group_layout.addWidget(self.remove_ch_Button, 1, 1, 1, 2)
         group_layout.addWidget(self.clear_ch_Button, 2, 1, 1, 2)
         group_layout.addWidget(self.checkBox_split_channels, 3, 0, 1, 1)
         group_layout.addWidget(self.checkBox_dpc_autofocus, 4, 0, 1, 1)
+        group_layout.addWidget(self.dpc_expo_label, 4, 1, 1, 1)
+        group_layout.addWidget(self.dpc_expo_edit, 4, 2, 1, 1)
 
         return group
 

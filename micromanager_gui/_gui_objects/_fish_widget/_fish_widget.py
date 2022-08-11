@@ -306,6 +306,8 @@ class FishWidget(FishWidgetGui):
         self._mmc.setExposure(10.0)
         # snap image
         self._mmc.snap()
+        # do we need to reset the exposure?
+        self._mmc.setExposure(self.fish_expo)
         # grab ROI
         current_ROI = self._mmc.getROI()
         self.x_pixels = current_ROI[2]
@@ -582,7 +584,10 @@ class FishWidget(FishWidgetGui):
         else:
             raise Exception("Configure fluidics first.")
 
+        # get FISH exposure to alternate with DPC exposure if used and different
+        self.fish_expo = self._mmc.getExposure()
         self.run_DPC = self.checkBox_dpc_autofocus.isChecked()
+        self.dpc_expo = float(self.dpc_expo_edit.text())
         # create stage tiling positions
         print("calculate scan volume")
         self._calculate_scan_volume()
@@ -623,16 +628,17 @@ class FishWidget(FishWidgetGui):
                 raise Exception("Error in fluidics unit.")
 
             # On the first round, acquire z stack using DPC only to create "ground truth" map of tissue
+            self._mmc.setExposure(self.dpc_expo)
             if r_idx == 0 and self.run_DPC:
                 print("make first DPC images")
                 # set zarr path for this round
-                # filename = f'DPC_fidicual_r{r_idx:03}_xy{xy_idx:03}.zarr'
-                filename = f"DPC_fidicual_r{r_idx:03}.zarr"
-                dpc_fidicual_zarr_output_path = zarr_dir_path / filename
+                # filename = f'DPC_fiducial_r{r_idx:03}_xy{xy_idx:03}.zarr'
+                filename = f"DPC_fiducial_r{r_idx:03}.zarr"
+                dpc_fiducial_zarr_output_path = zarr_dir_path / filename
 
                 # create and open zarr file
-                dpc_fidicual_data = zarr.open(
-                    str(dpc_fidicual_zarr_output_path),
+                dpc_fiducial_data = zarr.open(
+                    str(dpc_fiducial_zarr_output_path),
                     mode="w",
                     shape=(
                         self.n_xy_positions,
@@ -684,13 +690,13 @@ class FishWidget(FishWidgetGui):
                             # set channel to OFF
                             self._mmc.setConfig("Arduino", "OFF")
 
-                        dpc_fidicual_data[xy_idx, 0, z_idx, :, :] = (
+                        dpc_fiducial_data[xy_idx, 0, z_idx, :, :] = (
                             raw_dpc_images[1] - raw_dpc_images[0]
                         ) / (raw_dpc_images[1] + raw_dpc_images[0])
-                        dpc_fidicual_data[xy_idx, 1, z_idx, :, :] = (
+                        dpc_fiducial_data[xy_idx, 1, z_idx, :, :] = (
                             raw_dpc_images[3] - raw_dpc_images[2]
                         ) / (raw_dpc_images[3] + raw_dpc_images[2])
-                        dpc_fidicual_data[xy_idx, 2:6, z_idx, :, :] = raw_dpc_images
+                        dpc_fiducial_data[xy_idx, 2:6, z_idx, :, :] = raw_dpc_images
 
             for xy_idx in trange(self.n_xy_positions, desc="xy tile", position=0):
                 # create and open zarr file
@@ -744,6 +750,7 @@ class FishWidget(FishWidgetGui):
                     [4, self.y_pixels, self.x_pixels], dtype=np.uint16
                 )
                 if self.run_DPC:
+                    self._mmc.setExposure(self.dpc_expo)
                     dpc_images = np.zeros(
                         [2, self.y_pixels, self.x_pixels], dtype=np.float32
                     )
@@ -766,38 +773,44 @@ class FishWidget(FishWidgetGui):
                     )
 
                     # run 2D cross-correlation for each Z plane
-                    shifts = np.zeros([2, self.n_z_positions, 2], dtype=np.float32)
-                    errors = np.zeros([2, self.n_z_positions, 1], dtype=np.float32)
-                    for z_idx in range(self.n_z_positions):
-                        print(f"compute phase cross correlation for z_idx {z_idx}")
-                        (
-                            shifts[0, z_idx, :],
-                            errors[0, z_idx],
-                            _,
-                        ) = phase_cross_correlation(
-                            dpc_fidicual_data[xy_idx, 0, z_idx, :],
-                            dpc_images[0, :],
-                            upsample_factor=10,
-                            return_error=True,
-                        )
-                        (
-                            shifts[1, z_idx, :],
-                            errors[1, z_idx],
-                            _,
-                        ) = phase_cross_correlation(
-                            dpc_fidicual_data[xy_idx, 1, z_idx, :],
-                            dpc_images[1, :],
-                            upsample_factor=10,
-                            return_error=True,
-                        )
-
-                    # find best Z plane
-                    if len(errors) > 0:  # if there is no error in phase CC
-                        best_z_idx = np.amin(np.sum(errors, 0))
-                    else:
+                    try:
+                        # we can have several different types of exception because of low SNR or testing
+                        # conditions, it's more efficient to just ignore them and keep running the experiment
+                        shifts = np.zeros([2, self.n_z_positions, 2], dtype=np.float32)
+                        errors = np.zeros([2, self.n_z_positions, 1], dtype=np.float32)
+                        for z_idx in range(self.n_z_positions):
+                            print(f"compute phase cross correlation for z_idx {z_idx}")
+                            (
+                                shifts[0, z_idx, :],
+                                errors[0, z_idx],
+                                _,
+                            ) = phase_cross_correlation(
+                                dpc_fiducial_data[xy_idx, 0, z_idx, :],
+                                dpc_images[0, :],
+                                upsample_factor=10,
+                                return_error=True,
+                                # reference_mask=~np.isnan(dpc_fiducial_data[xy_idx, 0, z_idx, :]), 
+                                # moving_mask=~np.isnan(dpc_images[0, :]),
+                            )
+                            (
+                                shifts[1, z_idx, :],
+                                errors[1, z_idx],
+                                _,
+                            ) = phase_cross_correlation(
+                                dpc_fiducial_data[xy_idx, 1, z_idx, :],
+                                dpc_images[1, :],
+                                upsample_factor=10,
+                                return_error=True,
+                                # reference_mask=~np.isnan(dpc_fiducial_data[xy_idx, 1, z_idx, :]), 
+                                # moving_mask=~np.isnan(dpc_images[1, :]),
+                            )
+                            # find best Z plane
+                            best_z_idx = np.amin(np.sum(errors, 0))
+                    except Exception as e:
+                        print("An exception occured, no z shift will be applied:\n", e)
                         best_z_idx = None
 
-                    # calculate shift from fidicual stack
+                    # calculate shift from fiducial stack
                     current_z_offset = 0
                     if best_z_idx is not None:
                         if best_z_idx > self.n_z_positions // 2:
@@ -839,6 +852,7 @@ class FishWidget(FishWidgetGui):
 
                     # capture DPC image at this position
                     if self.run_DPC:
+                        self._mmc.setExposure(self.dpc_expo)
                         raw_dpc_images = np.zeros(
                             [4, self.y_pixels, self.x_pixels], dtype=np.uint16
                         )
@@ -865,6 +879,7 @@ class FishWidget(FishWidgetGui):
 
                     # capture red LED fluorescence image at this xyz position
                     # set channel to LED
+                    self._mmc.setExposure(self.fish_expo)
                     self._mmc.setConfig("Arduino", "LED")
                     # snap image
                     flr_round_data[xy_idx, z_idx, :, :] = self._mmc.snap()
