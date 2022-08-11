@@ -34,6 +34,12 @@ if TYPE_CHECKING:
 
 class FishWidget(FishWidgetGui):
     """Multi-dimensional acquisition Widget."""
+    # TODO: 
+    #  - edit and run microfluidic steps
+    #  - add individual DPC acquisitions
+    #  - add hot pixels and noise correction for DPC
+    #  - get position is multiposition not ticked
+    #  - pause / resume fluidics and whole experiment
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -312,6 +318,10 @@ class FishWidget(FishWidgetGui):
         current_ROI = self._mmc.getROI()
         self.x_pixels = current_ROI[2]
         self.y_pixels = current_ROI[3]
+        # add current position if no multiposition is used
+        if not self.stage_pos_groupBox.isChecked() or self.stage_tableWidget.rowCount() == 0:
+            self.stage_pos_groupBox.setChecked(True)
+            self.add_position()
         self.n_xy_positions = self.stage_tableWidget.rowCount()
 
         if self.rect_roi_checkBox.isChecked():
