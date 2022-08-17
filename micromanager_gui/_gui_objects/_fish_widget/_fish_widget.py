@@ -13,7 +13,6 @@ from micromanager_gui import _mda
 from ..._core import get_core_singleton
 from ._fish_gui import FishWidgetGui
 
-
 import numpy as np
 import zarr
 import time
@@ -30,15 +29,15 @@ from utils.fluidics_control import run_fluidic_program
 if TYPE_CHECKING:
     from pymmcore_plus.mda import PMDAEngine
 
-# TODO: add run fludics only, select / modify fluidic steps
 
 class FishWidget(FishWidgetGui):
     """Multi-dimensional acquisition Widget."""
     # TODO: 
-    #  - edit and run microfluidic steps
+    #  - rename widgets copied from napari-mm code to avoid conflicts?
+    #  - check multi position of FISH OK, no conflict with MDA's
+    #  - add run fludics only, select / modify fluidic steps
     #  - add individual DPC acquisitions
     #  - add hot pixels and noise correction for DPC
-    #  - get position is multiposition not ticked
     #  - pause / resume fluidics and whole experiment
 
     def __init__(self, parent=None):
@@ -62,6 +61,10 @@ class FishWidget(FishWidgetGui):
 
         self.browse_save_Button.clicked.connect(self.set_multi_d_acq_dir)
         self.run_Button.clicked.connect(self._on_run_clicked)
+
+        # connect for FISH config
+        self.browse_cfg_Button.clicked.connect(self._browse_cfg)
+        self.run_fluidics_Button.clicked.connect(self._run_fluidics)
 
         # connect for z stack
         self.set_top_Button.clicked.connect(self._set_top)
@@ -112,6 +115,7 @@ class FishWidget(FishWidgetGui):
             "serial_verbose": False,
             "flip_flow_direction": False,
         }
+        self.fluidics_initialized = False
 
         # arduino controller parameters
         self.arduino_port = "COM11"
@@ -135,7 +139,7 @@ class FishWidget(FishWidgetGui):
         newEngine.events.sequenceStarted.connect(self._on_mda_started)
         newEngine.events.sequenceFinished.connect(self._on_mda_finished)
         newEngine.events.sequencePauseToggled.connect(self._on_mda_paused)
-
+        
     def _set_enabled(self, enabled: bool):
         self.save_groupBox.setEnabled(enabled)
         self.acquisition_order_comboBox.setEnabled(enabled)
@@ -306,6 +310,122 @@ class FishWidget(FishWidgetGui):
         self.fish_dir_lineEdit.setText(self.save_dir)
         self.parent_path = Path(self.save_dir)
 
+    # load fluidics and codebook files
+    
+    def _browse_cfg(self) -> None:
+        """Open file dialog to select a config file."""
+        
+        (filename, _) = QtW.QFileDialog.getOpenFileName(
+            self, "Select a fluidics experiment configuration file", "", "(*.csv)"
+        )
+        if filename:
+            self.fluidics_cfg.setText(filename)
+            self._load_fluidics()
+    
+    def _update_table_from_dataframe(self):
+        """Add fluidics steps in the widget table"""
+        
+        nb_steps = len(self.df_fluidics)
+        # first remove potential existing rows
+        for i in range(self.fluidics_tableWidget.rowCount()):
+            self.fluidics_tableWidget.removeRow(0)
+        # add fluidics steps
+        for i in range(nb_steps):
+            self.fluidics_tableWidget.insertRow(i)
+            # add user checkable box
+            chkBoxItem = QtW.QTableWidgetItem()
+            chkBoxItem.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            chkBoxItem.setCheckState(Qt.Checked)
+            chkBoxItem.setTextAlignment(int(Qt.AlignHCenter | Qt.AlignVCenter))
+            self.fluidics_tableWidget.setItem(i, 0,chkBoxItem)
+            # add fluidics config values
+            for c, val in enumerate(self.df_fluidics.loc[i, :]):
+                item = QtW.QTableWidgetItem(str(val))
+                item.setTextAlignment(int(Qt.AlignHCenter | Qt.AlignVCenter))
+                self.fluidics_tableWidget.setItem(i, c+1, item)
+    
+    def _load_fluidics(self):
+        try:
+                       
+            df_fluidics = pd.read_csv(self.fluidics_cfg.text())
+            if "Unnamed: 0" in df_fluidics.columns:
+                # df_fluidics.index = df_fluidics["Unnamed: 0"]
+                # df_fluidics.index.name = ''
+                df_fluidics.drop(columns=["Unnamed: 0"], inplace=True)
+            self.df_fluidics = df_fluidics
+
+            self.n_iterative_rounds = self.df_fluidics["round"].max()
+            self.fluidics_loaded = True
+            print("Fluidics program loaded")
+
+            # Make fill editable fluidics table
+            self._update_table_from_dataframe()
+
+        except Exception as e:
+            raise Exception("Error in loading fluidics file:\n", e)
+
+    def _initialize_fluidics(self):
+        if self.fluidics_initialized:
+            print("Fluidics already initialized")
+        else:
+            # connect to pump
+            self.pump_controller = APump(self.pump_parameters)
+            # set pump to remote control
+            self.pump_controller.enableRemoteControl(True)
+
+            # connect to valves
+            self.valve_controller = HamiltonMVP(com_port=self.valve_COM_port)
+            # initialize valves
+            self.valve_controller.autoAddress()
+            print("Fluidics initialized succesfully")
+            self.fluidics_initialized = True
+
+    def _make_dataframe_from_table(self):
+        """
+        Convert fluidics steps listed in the fluidic table
+        into a DataFrame.
+        """
+        
+        nb_steps = self.fluidics_tableWidget.rowCount()
+        table = []
+        for i in range(nb_steps):
+            row_data = []
+            row_data.append(self.fluidics_tableWidget.item(i, 0).checkState() == Qt.Checked)
+            row_data.append(int(self.fluidics_tableWidget.item(i, 1).text()))
+            row_data.append(self.fluidics_tableWidget.item(i, 2).text())
+            row_data.append(float(self.fluidics_tableWidget.item(i, 3).text()))
+            row_data.append(int(self.fluidics_tableWidget.item(i, 4).text()))
+            table.append(row_data)
+        colnames = ["use", "round", "source", "time", "pump"]
+        df = pd.DataFrame(
+            data=table, 
+            columns=colnames,
+            )
+        return df
+
+    def _run_fluidics(self):
+        """Run all fluidics steps listed in the fluidic table."""
+        
+        nb_steps = self.fluidics_tableWidget.rowCount()
+        if nb_steps == 0:
+            print("There is no fluidics steps to run.")
+        else:
+            df = self._make_dataframe_from_table()
+            df = df.loc[df['use'], ["round", "source", "time", "pump"]]
+            if len(df) == 0:
+                print("No fluidic step is selected")
+            else:
+                print(f"Running fluidic steps:\n", df)
+                self._initialize_fluidics()
+                for r_idx in df['round'].unique():
+                    # run fluidics for this round
+                    success_fluidics = False
+                    success_fluidics = run_fluidic_program(
+                        int(r_idx), df, self.valve_controller, self.pump_controller
+                    )
+                    if not (success_fluidics):
+                        raise Exception("Error in fluidics unit.")
+            
     def _calculate_scan_volume(self):
 
         # set experiment exposure
@@ -410,22 +530,9 @@ class FishWidget(FishWidgetGui):
         self.n_y_positions = np.unique(self.xyz_stage_positions[:, 1]).size
         self.n_xy_tiles = len(self.xyz_stage_positions)
 
-    # load fluidics and codebook files
-    def _load_fluidics(self):
-        try:
-            # self.df_fluidics = self._read_fluidics_program(Path(self.fluidics_cfg.text()))
-            file_path = Path(
-                r"C:\Users\qi2lab\Documents\GitHub\napari-micromanager\micromanager_gui\_gui_objects\_fish_widget\no_fluids.csv"
-            )
-            # self.df_fluidics = self._read_fluidics_program(file_path))
-            self.df_fluidics = pd.read_csv(file_path)
-            # self.codebook = self._read_config_file(self.codebook_file_path)
-            self.n_iterative_rounds = self.df_fluidics["round"].max()
-            self.fluidics_loaded = True
-            print("Fluidics program loaded")
-            print(self.df_fluidics)
-        except:
-            raise Exception("Error in loading fluidics and/or codebook files.")
+
+    # def _load_codebook(self):
+    #     self.codebook = self._read_config_file(self.codebook_file_path)
 
     # # generate summary of fluidics and codebook files
     # def _generate_fluidics_summary(self):
@@ -533,21 +640,6 @@ class FishWidget(FishWidgetGui):
             with open(file_path, "w") as write_file:
                 json.dumps(str(dico_metadata), write_file)
 
-    def _read_fluidics_program(program_path):
-        """
-        Read fluidics program from CSV file as pandas dataframe
-        :param program_path: Path
-            location of fluidics program
-        :return df_program: Dataframe
-            dataframe containing fluidics program
-        """
-
-        df_program = pd.read_csv(program_path)
-        if "Unnamed: 0" in df_program.columns:
-            df_program.index = df_program["Unnamed: 0"]
-            df_program.drop(columns=["Unnamed: 0"], inplace=True)
-        return df_program
-
     def _on_run_clicked(self):
 
         if len(self._mmc.getLoadedDevices()) < 2:
@@ -580,17 +672,7 @@ class FishWidget(FishWidgetGui):
         output_dir_path = Path(self.fish_dir_lineEdit.text())
 
         if self.fluidics_loaded:
-            # connect to pump
-            self.pump_controller = APump(self.pump_parameters)
-            # set pump to remote control
-            self.pump_controller.enableRemoteControl(True)
-
-            # connect to valves
-            self.valve_controller = HamiltonMVP(com_port=self.valve_COM_port)
-            # initialize valves
-            self.valve_controller.autoAddress()
-            print("Fluidics initialized succesfully")
-
+            self._initialize_fluidics()
         else:
             raise Exception("Configure fluidics first.")
 

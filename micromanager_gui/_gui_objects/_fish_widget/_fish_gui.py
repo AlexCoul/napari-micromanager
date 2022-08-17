@@ -27,46 +27,6 @@ from qtpy.QtWidgets import (
 from superqt.fonticon import icon
 
 
-
-class FluidicsConfigurationWidget(QtW.QGroupBox):
-    """Widget to select and load fluidics experiment configuration."""
-
-    def __init__(self, parent: Optional[QtW.QWidget] = None) -> None:
-        super().__init__(parent)
-
-        self.setTitle("Fluidics experiment")
-
-        self.fluidics_cfg = QLineEdit()
-        self.fluidics_cfg.setPlaceholderText("IterativeFish.csv")
-
-        self.browse_cfg_Button = QPushButton("...")
-        self.browse_cfg_Button.clicked.connect(self._browse_cfg)
-
-        # self.load_cfg_Button = QPushButton("Load")
-        # self.load_cfg_Button.clicked.connect(self.load_cfg)
-
-        self.setLayout(QHBoxLayout())
-        self.layout().addWidget(self.fluidics_cfg)
-        self.layout().addWidget(self.browse_cfg_Button)
-        # self.layout().addWidget(self.load_cfg_Button)
-
-    def _browse_cfg(self) -> None:
-        """Open file dialog to select a config file."""
-        (filename, _) = QFileDialog.getOpenFileName(
-            self, "Select a fluidics experiment configuration file", "", "(*.csv)"
-        )
-        if filename:
-            self.fluidics_cfg.setText(filename)
-            print(" self.fluidics_cfg text is",  self.fluidics_cfg.text())
-
-    # def load_cfg(self) -> None:
-    #     """Load the config path currently in the line_edit."""
-    #     # from .. import _core
-    #     # _core.load_system_config(self.fluidics_cfg.text())
-    #     pass
-
-
-
 class FishWidgetGui(QWidget):
     """Just the UI portion of the Fish widget. Runtime logic in FishWidget."""
 
@@ -81,8 +41,8 @@ class FishWidgetGui(QWidget):
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.explorer_wdg = self._create_gui()
-        self._scroll.setWidget(self.explorer_wdg)
+        self.fish_wdg = self._create_gui()
+        self._scroll.setWidget(self.fish_wdg)
         self.layout().addWidget(self._scroll)
 
         # acq order and buttons wdg
@@ -96,8 +56,8 @@ class FishWidgetGui(QWidget):
         wdg_layout.setContentsMargins(10, 10, 10, 10)
         wdg.setLayout(wdg_layout)
         
-        self.fluidx_cfg_wdg = FluidicsConfigurationWidget()
-        wdg_layout.addWidget(self.fluidx_cfg_wdg)
+        self.fluidics_cfg_wdg = self._create_fluidics_config() #FluidicsConfigurationWidget()
+        wdg_layout.addWidget(self.fluidics_cfg_wdg)
 
         self.save_groupBox = self._create_save_group()
         wdg_layout.addWidget(self.save_groupBox)
@@ -166,6 +126,46 @@ class FishWidgetGui(QWidget):
         group_layout.addWidget(self.checkBox_save_pos)
 
         return group
+    
+    def _create_fluidics_config(self):
+        group = QGroupBox(title="Fluidics experiment")
+        group.setCheckable(True)
+        group.setChecked(True)
+        group.setSizePolicy(QSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed))
+        group_layout = QVBoxLayout()
+        fluidics_cfg_layout = QHBoxLayout()
+        # group_layout.setSpacing(10)
+        # group_layout.setContentsMargins(10, 10, 10, 10)
+        group.setLayout(group_layout)
+
+        # fish config
+        self.fluidics_cfg = QLineEdit()
+        self.fluidics_cfg.setPlaceholderText("IterativeFish.csv")
+
+        self.browse_cfg_Button = QPushButton("...")
+
+        # fluidics config table
+        self.fluidics_tableWidget = QTableWidget()
+        self.fluidics_tableWidget.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.fluidics_tableWidget.setMinimumHeight(5)
+        hdr = self.fluidics_tableWidget.horizontalHeader()
+        hdr.setSectionResizeMode(hdr.Stretch)
+        self.fluidics_tableWidget.verticalHeader().setVisible(False)
+        self.fluidics_tableWidget.setTabKeyNavigation(True)
+        self.fluidics_tableWidget.setColumnCount(5)
+        self.fluidics_tableWidget.setRowCount(0)
+        self.fluidics_tableWidget.setHorizontalHeaderLabels(["use", "round", "source", "time", "pump"])
+        
+        self.run_fluidics_Button = QPushButton("Run fluidics")
+
+        fluidics_cfg_layout.addWidget(self.fluidics_cfg)
+        fluidics_cfg_layout.addWidget(self.browse_cfg_Button)
+        group_layout.addLayout(fluidics_cfg_layout)
+        group_layout.addWidget(self.fluidics_tableWidget)
+        group_layout.addWidget(self.run_fluidics_Button)
+
+        return group
+
 
     def _create_channel_group(self):
         group = QGroupBox(title="Channels")
