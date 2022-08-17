@@ -71,6 +71,9 @@ class FishWidgetGui(QWidget):
         self.stack_groupBox = self._create_stack_groupBox()
         wdg_layout.addWidget(self.stack_groupBox)
 
+        self.dpc_groupBox = self._create_dpc_groupBox()
+        wdg_layout.addWidget(self.dpc_groupBox)
+
         return wdg
 
     def _create_save_group(self):
@@ -205,19 +208,12 @@ class FishWidgetGui(QWidget):
 
         # checkbox
         self.checkBox_split_channels = QCheckBox(text="Split Channels")
-        # checkbox
-        self.checkBox_dpc_autofocus = QCheckBox(text="Run DPC autofocus")
-        self.dpc_expo_label = QLabel(text="DPC expo (ms)")
-        self.dpc_expo_edit = QLineEdit()
-        self.dpc_expo_edit.setText("500")
+
 
         group_layout.addWidget(self.add_ch_Button, 0, 1, 1, 1)
         group_layout.addWidget(self.remove_ch_Button, 1, 1, 1, 2)
         group_layout.addWidget(self.clear_ch_Button, 2, 1, 1, 2)
         group_layout.addWidget(self.checkBox_split_channels, 3, 0, 1, 1)
-        group_layout.addWidget(self.checkBox_dpc_autofocus, 4, 0, 1, 1)
-        group_layout.addWidget(self.dpc_expo_label, 4, 1, 1, 1)
-        group_layout.addWidget(self.dpc_expo_edit, 4, 2, 1, 1)
 
         return group
 
@@ -269,7 +265,7 @@ class FishWidgetGui(QWidget):
         group_layout.addWidget(self.rect_roi_checkBox, 3, 1, 1, 2)
 
         return group
-    
+
     def _create_stack_groupBox(self):
         group = QGroupBox(title="Z Stacks")
         group.setCheckable(True)
@@ -426,6 +422,72 @@ class FishWidgetGui(QWidget):
         step_wdg_layout.addWidget(s)
         step_wdg_layout.addWidget(self.n_images_label)
         group_layout.addWidget(step_wdg)
+
+        return group
+
+    def _create_dpc_groupBox(self):
+        group = QGroupBox(title="DPC")
+        group.setCheckable(True)
+        group.setChecked(False)
+        group.setMinimumHeight(230)
+        group_layout = QVBoxLayout()
+        group_layout.setSpacing(10)
+        group_layout.setContentsMargins(10, 10, 10, 10)
+        group.setLayout(group_layout)
+
+        # checkbox
+        self.checkBox_dpc_autofocus = QCheckBox(text="Use DPC autofocus")
+        # Exposure time
+        expo = QHBoxLayout()
+        self.dpc_expo_label = QLabel(text="DPC expo:")
+        self.dpc_expo_time = QSpinBox()
+        self.dpc_expo_time.setMinimum(0)
+        self.dpc_expo_time.setMaximum(10000)
+        self.dpc_expo_time.setAlignment(Qt.AlignCenter)
+        self.dpc_expo_time.setValue(500)
+        self.dpc_expo_ms_label = QLabel(text="ms")
+        group_layout.addWidget(self.checkBox_dpc_autofocus)
+        expo.addWidget(self.dpc_expo_label)
+        expo.addWidget(self.dpc_expo_time)
+        expo.addWidget(self.dpc_expo_ms_label)
+        group_layout.addLayout(expo)
+        # Hot pixel correction
+        hotpix = QHBoxLayout()
+        self.dpc_hotpix_checkBox = QCheckBox(text="Correct hot pixels")
+        # load image file
+        self.dpc_cfg = QLineEdit()
+        self.dpc_cfg.setPlaceholderText("black.tiff")
+        self.dpc_cfg_Button = QPushButton("...")
+        # parameters correction
+        self.hotpix_thresh = QLineEdit()
+        self.hotpix_thresh.setPlaceholderText("threshold")
+        # compute correction
+        self.dpc_compute_Button = QPushButton("Compute")
+        self.dpc_visualize_Button = QPushButton("Visualize")
+        hotpix.addWidget(self.dpc_hotpix_checkBox)
+        hotpix.addWidget(self.dpc_cfg)
+        hotpix.addWidget(self.dpc_cfg_Button)
+        hotpix.addWidget(self.hotpix_thresh)
+        hotpix.addWidget(self.dpc_compute_Button)
+        hotpix.addWidget(self.dpc_visualize_Button)
+        group_layout.addLayout(hotpix)
+        # Denoising
+        denoise = QHBoxLayout()
+        self.dpc_denoise_checkBox = QCheckBox(text="Denoise")
+        # method
+        self.dpc_denoise_method = QComboBox()
+        self.dpc_denoise_method.addItems(["Gaussian", "Median", "Bin"])
+        # parameters correction
+        self.dpc_denoise_label = QLabel(text="size:")
+        self.dpc_denoise_param = QLineEdit()
+        self.dpc_denoise_param.setPlaceholderText("1")
+        # Acquire DPC images
+        acquire = QHBoxLayout()
+        self.dpc_snap = QPushButton("Snap curent position")
+        self.dpc_acquire = QPushButton("Acquire all positions")
+        acquire.addWidget(self.dpc_snap)
+        acquire.addWidget(self.dpc_acquire)
+        group_layout.addLayout(acquire)
 
         return group
 
