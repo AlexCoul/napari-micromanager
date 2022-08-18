@@ -347,11 +347,11 @@ class FishWidget(FishWidgetGui):
     def _load_fluidics(self):
         try:
                        
-            df_fluidics = pd.read_csv(self.fluidics_cfg.text())
-            if "Unnamed: 0" in df_fluidics.columns:
-                # df_fluidics.index = df_fluidics["Unnamed: 0"]
-                # df_fluidics.index.name = ''
-                df_fluidics.drop(columns=["Unnamed: 0"], inplace=True)
+            df_fluidics = pd.read_csv(self.fluidics_cfg.text())            
+            df_fluidics = df_fluidics[["round", "source", "time", "pump"]]
+            df_fluidics.dropna(axis=0, how='any', inplace=True)
+            df_fluidics["round"] = df_fluidics["round"].astype(int)
+            df_fluidics["pump"] = df_fluidics["pump"].astype(int)
             self.df_fluidics = df_fluidics
 
             self.n_iterative_rounds = self.df_fluidics["round"].max()
