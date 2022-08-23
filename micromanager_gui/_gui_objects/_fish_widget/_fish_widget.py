@@ -15,6 +15,7 @@ from ._fish_gui import FishWidgetGui
 
 import numpy as np
 import zarr
+import tifffile
 import time
 from tqdm import trange
 from skimage.registration import phase_cross_correlation
@@ -24,6 +25,7 @@ from hardware.HamiltonMVP import HamiltonMVP
 from hardware.APump import APump
 from hardware.Arduino import init_arduino, set_state
 from utils.fluidics_control import run_fluidic_program
+import utils.image_preprocessing as ipp
 
 
 if TYPE_CHECKING:
@@ -35,13 +37,13 @@ class FishWidget(FishWidgetGui):
     # TODO: 
     #  - rename widgets copied from napari-mm code to avoid conflicts?
     #  - check multi position of FISH OK, no conflict with MDA's
-    #  - add run fludics only, select / modify fluidic steps
     #  - add individual DPC acquisitions
     #  - add hot pixels and noise correction for DPC
     #  - pause / resume fluidics and whole experiment
 
-    def __init__(self, parent=None):
+    def __init__(self, viewer, parent=None):
         super().__init__(parent)
+        self.viewer = viewer
 
         self.pause_Button.hide()
         self.cancel_Button.hide()
@@ -93,6 +95,14 @@ class FishWidget(FishWidgetGui):
         # connect position table double click
         self.stage_tableWidget.cellDoubleClicked.connect(self.move_to_position)
 
+        # connect DPC events
+        self.dpc_dark_Button.clicked.connect(self._select_dark_image)
+        self.dpc_compute_Button.clicked.connect(self._compute_hotpix)
+        self.dpc_visualize_Button.clicked.connect(self._visualize_hotpix)
+        self.dpc_save_Button.clicked.connect(self._set_save_dpc_path)
+        self.dpc_snap_Button.clicked.connect(self._snap_dpc)
+        self.dpc_acquire_Button.clicked.connect(self._acquire_dpc)
+
         # events
         self._mmc.mda.events.sequenceStarted.connect(self._on_mda_started)
         self._mmc.mda.events.sequenceFinished.connect(self._on_mda_finished)
@@ -130,6 +140,10 @@ class FishWidget(FishWidgetGui):
         self.overlap = 0.2  # TODO: add choice of % tiles overlap
         self.pixel_size = 0.065
         self._update_n_images()
+
+        # hot pixels parameters
+        self.dpc_dark_loaded = False
+        self.dpc_dark_computed = False
 
     def _update_mda_engine(self, newEngine: PMDAEngine, oldEngine: PMDAEngine):
         oldEngine.events.sequenceStarted.disconnect(self._on_mda_started)
@@ -436,15 +450,236 @@ class FishWidget(FishWidgetGui):
                     )
                     if not (success_fluidics):
                         raise Exception("Error in fluidics unit.")
-            
+    
+    def _select_dark_image(self):
+        (filename, _) = QtW.QFileDialog.getOpenFileName(
+            self, "Select a dark image or stack", "", "(*.tif *.tiff);;All Files (*)"
+        )
+        if filename:
+            self.dpc_dark.setText(filename)
+            self.dpc_dark_loaded = True
+
+    def _compute_hotpix(self):
+        thresh = int(self.hotpix_thresh.text())
+        dark_img = tifffile.imread(self.dpc_dark.text()).astype(float)
+        self.hot_pxs_mask = ipp.make_hot_pixels_mask(dark_img, thresh=thresh)
+        self.dpc_dark_computed = True
+        print("Hot pixels mask computed")
+
+    def _visualize_hotpix(self):
+        # if no hotpix correction, visualize only dark image
+        # need to access to viewer, apparently need to pass viewer in init
+        if not self.dpc_dark_loaded:
+            print("Load a dark image or stack first")
+        else:
+            dark_img = tifffile.imread(self.dpc_dark.text()).astype(float)
+            self.viewer.add_image(dark_img, name='dark img')
+        if self.dpc_dark_computed:
+            self.viewer.add_image(self.hot_pxs_mask, name='hot pixels mask')
+            if dark_img.ndim > 2:
+                img_blackcorr = ipp.correct_hot_pixels_3D(dark_img, self.hot_pxs_mask)
+            else:
+                img_blackcorr = ipp.correct_hot_pixels_2D(dark_img, self.hot_pxs_mask)
+            self.viewer.add_image(img_blackcorr, name='hotpix-corrected dark image')
+    
+    def _set_save_dpc_path(self):
+        # set the directory
+        self.dpc_dir = QtW.QFileDialog(self)
+        self.dpc_dir.setFileMode(QtW.QFileDialog.DirectoryOnly)
+        self.dpc_save_dir = QtW.QFileDialog.getExistingDirectory(self.dpc_dir)
+        self.dpc_save_lineEdit.setText(self.dpc_save_dir)
+        self.dpc_save_dir = Path(self.dpc_save_dir)
+
+
+    def _snap_dpc(self):
+        """
+        Acquire a single plane DPC image.
+        
+        Notes
+        -----
+        It was supposed to be a single xyz position, it's currently
+        a single xy position, potentially multiple z positions.
+        """
+        self.dpc_expo = float(self.dpc_expo_time.value())
+        if not hasattr(self, 'y_pixels'):
+            print("calculate scan volume")
+            self._calculate_scan_volume()
+
+        # setup circular buffer to be large
+        self._mmc.clearCircularBuffer()
+        circ_buffer_mb = 8000
+        self._mmc.setCircularBufferMemoryFootprint(int(circ_buffer_mb))
+        self._mmc.setTimeoutMs(120000)
+
+        # On the first round, acquire z stack using DPC only to create "ground truth" map of tissue
+        self._mmc.setExposure(self.dpc_expo)
+
+        # create and open zarr file
+        dpc_snap = zarr.zeros(
+            shape=(
+                (self.n_DPC_illuminations + self.n_DPC_illuminations // 2),
+                self.y_pixels,
+                self.x_pixels,
+            ),
+            chunks=(1, self.y_pixels, self.x_pixels),
+            dtype=np.float32,
+        )
+
+        raw_dpc_images = np.zeros(
+            [self.n_DPC_illuminations, self.y_pixels, self.x_pixels], dtype=np.uint16
+        )
+        for dpc_idx in range(self.n_DPC_illuminations):
+            # set channel to current DPC illumination
+            self._mmc.setConfig("Arduino", self.DPC_commands[dpc_idx])
+
+            # snap image
+            raw_dpc_images[dpc_idx, :] = self._mmc.snap()
+            time.sleep(0.5)
+            # set channel to OFF
+            self._mmc.setConfig("Arduino", "OFF")
+
+        # we save / display the real raw images, but for
+        # the DPC computation we correct them first
+        dpc_snap[2:6, :, :] = raw_dpc_images
+        # perform hot pixel correction
+        if self.dpc_dark_computed:
+            for i in range(4):
+                raw_dpc_images[i] = ipp.correct_hot_pixels_2D(raw_dpc_images[i], self.hot_pxs_mask)
+        # denoise images
+        if self.dpc_denoise_checkBox.isChecked():
+            method = self.dpc_denoise_method.currentText()
+            size = float(self.dpc_denoise_param.text())
+            for i in range(4):
+                raw_dpc_images[i] = ipp.denoise_2D(raw_dpc_images[i], method, size)
+
+        dpc_snap[0, :, :] = (
+            raw_dpc_images[1] - raw_dpc_images[0]
+        ) / (raw_dpc_images[1] + raw_dpc_images[0])
+        dpc_snap[1, :, :] = (
+            raw_dpc_images[3] - raw_dpc_images[2]
+        ) / (raw_dpc_images[3] + raw_dpc_images[2])
+
+        self.viewer.add_image(dpc_snap, name='DPC snap')
+
+    def _acquire_dpc(self):
+        """
+        Acquire a DPC multiposition stack.        
+        """
+
+        self.dpc_expo = float(self.dpc_expo_time.value())
+        if not hasattr(self, 'y_pixels'):
+            print("calculate scan volume")
+            self._calculate_scan_volume()
+
+        # setup circular buffer to be large
+        self._mmc.clearCircularBuffer()
+        circ_buffer_mb = 8000
+        self._mmc.setCircularBufferMemoryFootprint(int(circ_buffer_mb))
+        self._mmc.setTimeoutMs(120000)
+
+        # On the first round, acquire z stack using DPC only to create "ground truth" map of tissue
+        self._mmc.setExposure(self.dpc_expo)
+
+        if self.dpc_save_checkBox.isChecked():
+            filename = f"DPC_acquisition.zarr"
+            dpc_acq_path = self.dpc_save_dir / filename
+
+            # create and open zarr file
+            dpc_acq = zarr.open(
+                str(dpc_acq_path),
+                mode="w",
+                shape=(
+                    self.n_xy_positions,
+                    (self.n_DPC_illuminations + self.n_DPC_illuminations // 2),
+                    self.n_z_positions,
+                    self.y_pixels,
+                    self.x_pixels,
+                ),
+                chunks=(1, 1, 1, self.y_pixels, self.x_pixels),
+                dtype=np.float32,
+            )
+        else:
+            # create and open zarr file
+            dpc_acq = zarr.zeros(
+                shape=(
+                    self.n_xy_positions,
+                    (self.n_DPC_illuminations + self.n_DPC_illuminations // 2),
+                    self.n_z_positions,
+                    self.y_pixels,
+                    self.x_pixels,
+                ),
+                chunks=(1, 1, 1, self.y_pixels, self.x_pixels),
+                dtype=np.float32,
+            )
+
+        for xy_idx in trange(self.n_xy_tiles, desc="xy tile", position=0):
+
+            # set XY stage position
+            self._mmc.setXYPosition(
+                self.xyz_stage_positions[xy_idx, 0],
+                self.xyz_stage_positions[xy_idx, 1],
+            )
+
+            # move to middle of z stack
+            self._mmc.setPosition(
+                self._mmc.getFocusDevice(), self.xyz_stage_positions[xy_idx, 2]
+            )
+
+            for z_idx in trange(
+                self.n_z_positions, desc="z position", position=1, leave=False
+            ):
+
+                # set Z stage position taking offset into account
+                current_z_position = (
+                    self.xyz_stage_positions[xy_idx, 2]
+                    + self.z_displacements[z_idx]
+                )
+                self._mmc.setPosition(
+                    self._mmc.getFocusDevice(), current_z_position
+                )
+
+                raw_dpc_images = np.zeros(
+                    [4, self.y_pixels, self.x_pixels], dtype=np.uint16
+                )
+                for dpc_idx in range(self.n_DPC_illuminations):
+                    # set channel to current DPC illumination
+                    self._mmc.setConfig("Arduino", self.DPC_commands[dpc_idx])
+
+                    # snap image
+                    raw_dpc_images[dpc_idx, :] = self._mmc.snap()
+                    time.sleep(0.5)
+                    # set channel to OFF
+                    self._mmc.setConfig("Arduino", "OFF")
+
+                # we save / display the real raw images, but for
+                # the DPC computation we correct them first
+                dpc_acq[xy_idx, 2:6, z_idx, :, :] = raw_dpc_images
+                # perform hot pixel correction
+                if self.dpc_dark_computed:
+                    for i in range(4):
+                        raw_dpc_images[i] = ipp.correct_hot_pixels_2D(raw_dpc_images[i], self.hot_pxs_mask)
+                # denoise images
+                if self.dpc_denoise_checkBox.isChecked():
+                    method = self.dpc_denoise_method.currentText()
+                    size = float(self.dpc_denoise_param.text())
+                    for i in range(4):
+                        raw_dpc_images[i] = ipp.denoise_2D(raw_dpc_images[i], method, size)
+
+                dpc_acq[xy_idx, 0, z_idx, :, :] = (
+                    raw_dpc_images[1] - raw_dpc_images[0]
+                ) / (raw_dpc_images[1] + raw_dpc_images[0])
+                dpc_acq[xy_idx, 1, z_idx, :, :] = (
+                    raw_dpc_images[3] - raw_dpc_images[2]
+                ) / (raw_dpc_images[3] + raw_dpc_images[2])
+        n_DPC_show = self.n_DPC_illuminations // 2
+        self.viewer.add_image(dpc_acq[:, :n_DPC_show, :, :, :], name='DPC acquisition stack')
+
     def _calculate_scan_volume(self):
 
         # set experiment exposure
         self._mmc.setExposure(10.0)
         # snap image
         self._mmc.snap()
-        # do we need to reset the exposure?
-        self._mmc.setExposure(self.fish_expo)
         # grab ROI
         current_ROI = self._mmc.getROI()
         self.x_pixels = current_ROI[2]
@@ -526,11 +761,6 @@ class FishWidget(FishWidgetGui):
             self.z_step = 0
             self.n_z_positions = 1
             self.z_displacements = np.array([0])
-
-        print(f"n_z_positions {self.n_z_positions}")
-        print(f"z_end {self.z_end}")
-        print(f"z_start {self.z_start}")
-        print(f"z_step {self.z_step}")
 
         # to save experiment parameters latter
         self.x_min_position = self.xyz_stage_positions[:, 0].min()
