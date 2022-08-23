@@ -212,9 +212,9 @@ class FishWidget(FishWidgetGui):
         if len(self._mmc.getLoadedDevices()) <= 1:
             return False
 
-        channel_group = self._mmc.getChannelGroup()
-        if not channel_group:
-            return False
+        channel_group = 'Arduino' #self._mmc.getChannelGroup()
+        # if not channel_group:
+        #     return False
 
         idx = self.channel_tableWidget.rowCount()
         self.channel_tableWidget.insertRow(idx)
@@ -223,11 +223,11 @@ class FishWidget(FishWidgetGui):
         channel_comboBox = QtW.QComboBox(self)
         channel_exp_spinBox = QtW.QSpinBox(self)
         channel_exp_spinBox.setRange(0, 10000)
-        channel_exp_spinBox.setValue(100)
+        channel_exp_spinBox.setValue(500)
 
-        if channel_group := self._mmc.getChannelGroup():
-            channel_list = list(self._mmc.getAvailableConfigs(channel_group))
-            channel_comboBox.addItems(channel_list)
+        # if channel_group := self._mmc.getChannelGroup():
+        channel_list = list(self._mmc.getAvailableConfigs(channel_group))
+        channel_comboBox.addItems(channel_list)
 
         self.channel_tableWidget.setCellWidget(idx, 0, channel_comboBox)
         self.channel_tableWidget.setCellWidget(idx, 1, channel_exp_spinBox)
@@ -403,6 +403,17 @@ class FishWidget(FishWidgetGui):
             )
         return df
 
+    def _get_channels(self):        
+        channels = [
+            {
+                "config": self.channel_tableWidget.cellWidget(c, 0).text(),
+                "group": "Arduino",
+                "exposure": self.channel_tableWidget.cellWidget(c, 1).value(),
+            }
+            for c in range(self.channel_tableWidget.rowCount())
+        ]
+        return channels
+    
     def _run_fluidics(self):
         """Run all fluidics steps listed in the fluidic table."""
         
@@ -641,7 +652,8 @@ class FishWidget(FishWidgetGui):
                 json.dumps(str(dico_metadata), write_file)
 
     def _on_run_clicked(self):
-
+        # TODO: add multiple channels, for now
+        # only one is supported: Arduino:LED
         if len(self._mmc.getLoadedDevices()) < 2:
             raise ValueError("Load a MM cfg file first.")
 
@@ -676,10 +688,11 @@ class FishWidget(FishWidgetGui):
         else:
             raise Exception("Configure fluidics first.")
 
-        # get FISH exposure to alternate with DPC exposure if used and different
-        self.fish_expo = self._mmc.getExposure()
-        self.run_DPC = self.checkBox_dpc_autofocus.isChecked()
-        self.dpc_expo = float(self.dpc_expo_edit.text())
+        # get FISH exposure and DPC exposure times
+        channels = self._get_channels()
+        self.fish_expo = channels[0]["exposure"]
+        self.run_DPC = self.dpc_groupBox.isChecked() and self.dpc_autofocus_checkBox.isChecked()
+        self.dpc_expo = float(self.dpc_expo_time.value())
         # create stage tiling positions
         print("calculate scan volume")
         self._calculate_scan_volume()
@@ -972,6 +985,8 @@ class FishWidget(FishWidgetGui):
                     # capture red LED fluorescence image at this xyz position
                     # set channel to LED
                     self._mmc.setExposure(self.fish_expo)
+                    # in the future use (channels[c]["group"], channels[c]["channel"])
+                    # and additional domension to the zarr object
                     self._mmc.setConfig("Arduino", "LED")
                     # snap image
                     flr_round_data[xy_idx, z_idx, :, :] = self._mmc.snap()

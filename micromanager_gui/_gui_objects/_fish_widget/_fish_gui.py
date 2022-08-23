@@ -436,7 +436,8 @@ class FishWidgetGui(QWidget):
         group.setLayout(group_layout)
 
         # checkbox
-        self.checkBox_dpc_autofocus = QCheckBox(text="Use DPC autofocus")
+        self.dpc_autofocus_checkBox = QCheckBox(text="Use DPC autofocus")
+        group_layout.addWidget(self.dpc_autofocus_checkBox)
         # Exposure time
         expo = QHBoxLayout()
         self.dpc_expo_label = QLabel(text="DPC expo:")
@@ -446,7 +447,6 @@ class FishWidgetGui(QWidget):
         self.dpc_expo_time.setAlignment(Qt.AlignCenter)
         self.dpc_expo_time.setValue(500)
         self.dpc_expo_ms_label = QLabel(text="ms")
-        group_layout.addWidget(self.checkBox_dpc_autofocus)
         expo.addWidget(self.dpc_expo_label)
         expo.addWidget(self.dpc_expo_time)
         expo.addWidget(self.dpc_expo_ms_label)
