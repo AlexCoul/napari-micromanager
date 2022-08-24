@@ -35,11 +35,10 @@ if TYPE_CHECKING:
 class FishWidget(FishWidgetGui):
     """Multi-dimensional acquisition Widget."""
     # TODO: 
-    #  - rename widgets copied from napari-mm code to avoid conflicts?
-    #  - check multi position of FISH OK, no conflict with MDA's
-    #  - add individual DPC acquisitions
-    #  - add hot pixels and noise correction for DPC
+    #  - use numba to use JIT or GPU for DPC preprocessing and computation
+    #  - or run it in parallel during following acquisitions
     #  - pause / resume fluidics and whole experiment
+    #  - add possibility for other channels controlled by the Arduino card
 
     def __init__(self, viewer, parent=None):
         super().__init__(parent)
@@ -420,7 +419,7 @@ class FishWidget(FishWidgetGui):
     def _get_channels(self):        
         channels = [
             {
-                "config": self.channel_tableWidget.cellWidget(c, 0).text(),
+                "config": self.channel_tableWidget.cellWidget(c, 0).currentText(),
                 "group": "Arduino",
                 "exposure": self.channel_tableWidget.cellWidget(c, 1).value(),
             }
@@ -1025,13 +1024,26 @@ class FishWidget(FishWidgetGui):
                             # set channel to OFF
                             self._mmc.setConfig("Arduino", "OFF")
 
+                        # we save / display the real raw images, but for
+                        # the DPC computation we correct them first
+                        dpc_fiducial_data[xy_idx, 2:6, z_idx, :, :] = raw_dpc_images
+                        # perform hot pixel correction
+                        if self.dpc_dark_computed:
+                            for i in range(4):
+                                raw_dpc_images[i] = ipp.correct_hot_pixels_2D(raw_dpc_images[i], self.hot_pxs_mask)
+                        # denoise images
+                        if self.dpc_denoise_checkBox.isChecked():
+                            method = self.dpc_denoise_method.currentText()
+                            size = float(self.dpc_denoise_param.text())
+                            for i in range(4):
+                                raw_dpc_images[i] = ipp.denoise_2D(raw_dpc_images[i], method, size)
+
                         dpc_fiducial_data[xy_idx, 0, z_idx, :, :] = (
                             raw_dpc_images[1] - raw_dpc_images[0]
                         ) / (raw_dpc_images[1] + raw_dpc_images[0])
                         dpc_fiducial_data[xy_idx, 1, z_idx, :, :] = (
                             raw_dpc_images[3] - raw_dpc_images[2]
                         ) / (raw_dpc_images[3] + raw_dpc_images[2])
-                        dpc_fiducial_data[xy_idx, 2:6, z_idx, :, :] = raw_dpc_images
 
             for xy_idx in trange(self.n_xy_positions, desc="xy tile", position=0):
                 # create and open zarr file
@@ -1100,6 +1112,17 @@ class FishWidget(FishWidgetGui):
                         # set channel to OFF
                         self._mmc.setConfig("Arduino", "OFF")
 
+                    # perform hot pixel correction
+                    if self.dpc_dark_computed:
+                        for i in range(self.n_DPC_illuminations):
+                            raw_dpc_images[i] = ipp.correct_hot_pixels_2D(raw_dpc_images[i], self.hot_pxs_mask)
+                    # denoise images
+                    if self.dpc_denoise_checkBox.isChecked():
+                        method = self.dpc_denoise_method.currentText()
+                        size = float(self.dpc_denoise_param.text())
+                        for i in range(self.n_DPC_illuminations):
+                            raw_dpc_images[i] = ipp.denoise_2D(raw_dpc_images[i], method, size)
+
                     dpc_images[0, :] = (raw_dpc_images[1] - raw_dpc_images[0]) / (
                         raw_dpc_images[1] + raw_dpc_images[0]
                     )
@@ -1111,6 +1134,8 @@ class FishWidget(FishWidgetGui):
                     try:
                         # we can have several different types of exception because of low SNR or testing
                         # conditions, it's more efficient to just ignore them and keep running the experiment
+
+                        # TODO: Check the z-shift is in the right orientation
                         shifts = np.zeros([2, self.n_z_positions, 2], dtype=np.float32)
                         errors = np.zeros([2, self.n_z_positions, 1], dtype=np.float32)
                         for z_idx in range(self.n_z_positions):
@@ -1203,14 +1228,26 @@ class FishWidget(FishWidgetGui):
                             # set channel to OFF
                             self._mmc.setConfig("Arduino", "OFF")
 
-                        # TODO: use numba to use JIT or GPU function
+                        # we save / display the real raw images, but for
+                        # the DPC computation we correct them first
+                        dpc_round_data[xy_idx, 2:6, z_idx, :, :] = raw_dpc_images
+                        # perform hot pixel correction
+                        if self.dpc_dark_computed:
+                            for i in range(self.n_DPC_illuminations):
+                                raw_dpc_images[i] = ipp.correct_hot_pixels_2D(raw_dpc_images[i], self.hot_pxs_mask)
+                        # denoise images
+                        if self.dpc_denoise_checkBox.isChecked():
+                            method = self.dpc_denoise_method.currentText()
+                            size = float(self.dpc_denoise_param.text())
+                            for i in range(self.n_DPC_illuminations):
+                                raw_dpc_images[i] = ipp.denoise_2D(raw_dpc_images[i], method, size)
+
                         dpc_round_data[xy_idx, 0, z_idx, :, :] = (
                             raw_dpc_images[1] - raw_dpc_images[0]
                         ) / (raw_dpc_images[1] + raw_dpc_images[0])
                         dpc_round_data[xy_idx, 1, z_idx, :, :] = (
                             raw_dpc_images[3] - raw_dpc_images[2]
                         ) / (raw_dpc_images[3] + raw_dpc_images[2])
-                        dpc_round_data[xy_idx, 2:6, z_idx, :, :] = raw_dpc_images
 
                     # capture red LED fluorescence image at this xyz position
                     # set channel to LED

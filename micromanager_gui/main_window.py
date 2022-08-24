@@ -43,7 +43,7 @@ class MainWindow(MicroManagerWidget):
     """The main napari-micromanager widget that gets added to napari."""
 
     def __init__(self, viewer: napari.viewer.Viewer, remote=False):
-        super().__init__()
+        super().__init__(viewer)
 
         # create connection to mmcore server or process-local variant
         self._mmc = _core.get_core_singleton(remote)
@@ -60,7 +60,7 @@ class MainWindow(MicroManagerWidget):
 
         # add mda and explorer tabs to mm_tab widget
         sizepolicy = QtW.QSizePolicy(
-            QtW.QSizePolicy.Expanding, QtW.QSizePolicy.Expanding
+            QtW.QSizePolicy.Expanding, QtW.QSizePolicy.Maximum
         )
         self.tab_wdg.setSizePolicy(sizepolicy)
 
