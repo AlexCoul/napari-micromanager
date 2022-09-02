@@ -253,16 +253,28 @@ class FishWidgetGui(QWidget):
         self.remove_pos_Button = QPushButton(text="Remove")
         self.remove_pos_Button.setMinimumWidth(min_size)
         self.remove_pos_Button.setSizePolicy(btn_sizepolicy)
+        self.replace_pos_Button = QPushButton(text="Replace")
+        self.replace_pos_Button.setMinimumWidth(min_size)
+        self.replace_pos_Button.setSizePolicy(btn_sizepolicy)
         self.clear_pos_Button = QPushButton(text="Clear")
         self.clear_pos_Button.setMinimumWidth(min_size)
         self.clear_pos_Button.setSizePolicy(btn_sizepolicy)
+        self.save_pos_Button = QPushButton(text="Save")
+        self.save_pos_Button.setMinimumWidth(min_size)
+        self.save_pos_Button.setSizePolicy(btn_sizepolicy)
+        self.load_pos_Button = QPushButton(text="Load")
+        self.load_pos_Button.setMinimumWidth(min_size)
+        self.load_pos_Button.setSizePolicy(btn_sizepolicy)
 
         self.rect_roi_checkBox = QCheckBox(text="Make rectangle ROI")
 
         group_layout.addWidget(self.add_pos_Button, 0, 1, 1, 1)
         group_layout.addWidget(self.remove_pos_Button, 1, 1, 1, 2)
-        group_layout.addWidget(self.clear_pos_Button, 2, 1, 1, 2)
-        group_layout.addWidget(self.rect_roi_checkBox, 3, 1, 1, 2)
+        group_layout.addWidget(self.replace_pos_Button, 2, 1, 1, 2)
+        group_layout.addWidget(self.clear_pos_Button, 3, 1, 1, 2)
+        group_layout.addWidget(self.save_pos_Button, 4, 1, 1, 2)
+        group_layout.addWidget(self.load_pos_Button, 5, 1, 1, 2)
+        group_layout.addWidget(self.rect_roi_checkBox, 6, 1, 1, 2)
 
         return group
 

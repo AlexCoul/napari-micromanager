@@ -26,7 +26,7 @@ from hardware.APump import APump
 from hardware.Arduino import init_arduino, set_state
 from utils.fluidics_control import run_fluidic_program
 import utils.image_preprocessing as ipp
-
+import utils.file_io as fio
 
 if TYPE_CHECKING:
     from pymmcore_plus.mda import PMDAEngine
@@ -59,6 +59,8 @@ class FishWidget(FishWidgetGui):
         self.add_ch_Button.clicked.connect(self._add_channel)
         self.remove_ch_Button.clicked.connect(self.remove_channel)
         self.clear_ch_Button.clicked.connect(self.clear_channel)
+        self.load_pos_Button.clicked.connect(self._load_positionlist)
+        self.save_pos_Button.clicked.connect(self._save_positionlist)
 
         self.browse_save_Button.clicked.connect(self.set_multi_d_acq_dir)
         self.run_Button.clicked.connect(self._on_run_clicked)
@@ -322,6 +324,54 @@ class FishWidget(FishWidgetGui):
         self.save_dir = QtW.QFileDialog.getExistingDirectory(self.dir)
         self.fish_dir_lineEdit.setText(self.save_dir)
         self.parent_path = Path(self.save_dir)
+
+    def _replace_positionlist(self):
+        pass
+
+    def _load_positionlist(self):
+        
+        (filename, _) = QtW.QFileDialog.getOpenFileName(
+            self, "Select a positionList file", "", "(*.pos *.json)"
+        )
+        if filename:
+            pos_df = fio.load_positionlist(filename)
+            # map column name to position in table
+            col_order = {'x':0, 'y':1, 'z':2}
+            # clear_positions() without toggle checkbox
+            self.stage_tableWidget.clearContents()
+            self.stage_tableWidget.setRowCount(0)
+            # add_position() without devices or toggle checkbox
+            for _, row in pos_df.iterrows():
+                idx = self._add_position_row()
+                for col in pos_df.columns:
+                    item = QtW.QTableWidgetItem(str(row[col]))
+                    item.setTextAlignment(int(Qt.AlignHCenter | Qt.AlignVCenter))
+                    self.stage_tableWidget.setItem(idx, col_order[col], item)
+
+    
+    def _save_positionlist(self):
+        filename = QtW.QFileDialog.getSaveFileName(self, 'Save position list as a .csv')
+        if filename:
+            # extract path from tuple (path, file type)
+            filename = filename[0]
+            # Make dataframe from positions table
+            nb_rows = self.stage_tableWidget.rowCount()
+            if nb_rows > 0:
+                table = []
+                for i in range(nb_rows):
+                    row_data = []
+                    row_data.append(float(self.stage_tableWidget.item(i, 0).text()))
+                    row_data.append(float(self.stage_tableWidget.item(i, 1).text()))
+                    row_data.append(float(self.stage_tableWidget.item(i, 2).text()))
+                    table.append(row_data)
+                colnames = ["x", "y", "z"]
+                df = pd.DataFrame(
+                    data=table, 
+                    columns=colnames,
+                    )
+                if not filename.endswith('.csv'):
+                    filename = filename + '.csv'
+                df.to_csv(filename, index=False)
 
     # load fluidics and codebook files
     
